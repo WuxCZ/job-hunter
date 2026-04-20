@@ -5,7 +5,9 @@ import os
 import sys
 from dataclasses import asdict
 
-from jobhunter_bot.ai import build_message
+import time
+
+from jobhunter_bot.ai import build_message, evaluate_fit
 from jobhunter_bot.browser_apply import apply_to_job, init_session
 from jobhunter_bot.config import load_config
 from jobhunter_bot.db import Database
@@ -55,6 +57,11 @@ def cmd_run(
     ignore_db: bool = False,
     skip_gemini_form_check: bool = False,
     headless: bool = False,
+    safe_mode: bool = True,
+    min_fit: int = 50,
+    max_apply: int = 50,
+    pause_seconds: int = 15,
+    max_consecutive_fails: int = 5,
 ) -> None:
     cfg = load_config()
     db = Database(cfg.db_path)
@@ -90,6 +97,17 @@ def cmd_run(
     if headless:
         print("Headless prohlížeč (bez okna)")
 
+    if safe_mode:
+        print(
+            f"Safe mode: min fit={min_fit}, max odeslání={max_apply}, "
+            f"pauza={pause_seconds}s, stop po {max_consecutive_fails} FAILech v řadě."
+        )
+    else:
+        print("Safe mode VYPNUTÝ (žádné brzdy) — používáš na vlastní riziko.")
+
+    apply_attempts = 0
+    consecutive_fails = 0
+
     for listing in listings:
         if normalize_job_url(listing.url) in site_applied_urls:
             if not dry_run:
@@ -105,6 +123,23 @@ def cmd_run(
             skipped_count += 1
             print(f"SKIP (duplicitni): {listing.title}")
             continue
+
+        # --- Safe-mode brzdy PŘED voláním browseru (úspora času) ---
+        score, reason, _fit_details = evaluate_fit(listing)
+        if safe_mode and score < min_fit:
+            if not dry_run:
+                db.mark_skipped(listing)
+            skipped_count += 1
+            print(f"SKIP (fit {score} < min {min_fit}): {listing.title}")
+            continue
+
+        if safe_mode and apply_attempts >= max_apply:
+            print(f"Safe mode: dosažen limit max odeslání = {max_apply}. Ukončuji běh.")
+            break
+
+        if safe_mode and apply_attempts > 0 and pause_seconds > 0:
+            print(f"Safe mode: pauza {pause_seconds}s před dalším pokusem…")
+            time.sleep(pause_seconds)
 
         sm = max(0, min(10_000, int(browser_slow_mo_ms)))
         if sm:
@@ -153,19 +188,59 @@ def cmd_run(
             continue
         for line in apply_info:
             print(line)
+        apply_attempts += 1
+
+        # Retry once at server error (jobs.cz občas vrátí "We ran into a problem")
+        if not ok and apply_err and "server chyba" in apply_err.lower() and not dry_run:
+            print(f"Retry za 60s: {listing.title} (server chyba jobs.cz)")
+            time.sleep(60)
+            retry_info: list[str] = []
+            try:
+                ok, apply_err = apply_to_job(
+                    listing=listing,
+                    cv_path=cfg.cv_path,
+                    storage_state_path=cfg.storage_state_path,
+                    message=message,
+                    dry_run=dry_run,
+                    browser_slow_mo_ms=sm,
+                    applicant_full_name=name_apply,
+                    applicant_email=email_apply,
+                    applicant_phone=os.getenv("APPLICANT_PHONE", "").strip(),
+                    applicant_salary=os.getenv("APPLICANT_SALARY", "").strip(),
+                    gemini_api_key=cfg.gemini_api_key,
+                    gemini_model=cfg.gemini_model,
+                    info_log=retry_info,
+                    skip_gemini_form_check=True,
+                    headless=headless,
+                )
+            except Exception as retry_exc:
+                ok = False
+                apply_err = f"retry selhal: {retry_exc}"
+            for line in retry_info:
+                print(f"[retry] {line}")
+
         if ok:
             if not dry_run:
                 db.mark_applied(listing)
                 applied_count += 1
-                print(f"OK: {listing.title}")
+                consecutive_fails = 0
+                print(f"OK: {listing.title} (fit {score})")
             else:
                 print(f"DRY RUN (nic neodeslano): {listing.title}")
         else:
             failed_count += 1
-            print(f"FAIL: {listing.title} — {apply_err}")
+            consecutive_fails += 1
+            print(f"FAIL: {listing.title} (fit {score}) — {apply_err}")
+            if safe_mode and consecutive_fails >= max_consecutive_fails:
+                print(
+                    f"Safe mode: {consecutive_fails} FAILů v řadě → HARD STOP. "
+                    "Zkontroluj diagnostiku v debug_apply_failures/."
+                )
+                break
 
     print(
-        f"Hotovo | applied={applied_count} skipped={skipped_count} failed={failed_count} dry_run={dry_run}"
+        f"Hotovo | applied={applied_count} skipped={skipped_count} "
+        f"failed={failed_count} dry_run={dry_run}"
     )
 
 
@@ -216,6 +291,20 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Chromium bez okna (rychlejší dávkový dry-run)",
     )
+    run_p.add_argument(
+        "--no-safe-mode",
+        action="store_true",
+        help="Vypne bezpečnostní limity (rate-limit, min-fit, hard-stop). Používej opatrně.",
+    )
+    run_p.add_argument("--min-fit", type=int, default=50, help="Safe mode: min fit score pro odeslání")
+    run_p.add_argument("--max-apply", type=int, default=50, help="Safe mode: max odeslání za běh")
+    run_p.add_argument("--pause-seconds", type=int, default=15, help="Safe mode: pauza mezi pokusy")
+    run_p.add_argument(
+        "--max-consecutive-fails",
+        type=int,
+        default=5,
+        help="Safe mode: hard stop po N FAILech v řadě",
+    )
 
     sub.add_parser("gui")
     sub.add_parser("show-config")
@@ -248,6 +337,11 @@ def main() -> None:
             ignore_db=getattr(args, "ignore_db", False),
             skip_gemini_form_check=getattr(args, "no_gemini_form_check", False),
             headless=getattr(args, "headless", False),
+            safe_mode=not getattr(args, "no_safe_mode", False),
+            min_fit=getattr(args, "min_fit", 50),
+            max_apply=getattr(args, "max_apply", 50),
+            pause_seconds=getattr(args, "pause_seconds", 15),
+            max_consecutive_fails=getattr(args, "max_consecutive_fails", 5),
         )
     elif args.command == "gui":
         launch_gui()
