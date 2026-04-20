@@ -171,6 +171,36 @@ def _try_click_apply_entry(page) -> bool:
 
 
 def _switch_to_own_file_upload_frame(fr, page) -> None:
+    # 1) Jobs.cz /jof/: přímý radio button userProfileAttached=custom (důležité —
+    #    pokud zůstane na 'jobs' a my uploadneme custom CV, server odmítne jako konflikt).
+    for sel in (
+        "input[type='radio'][name='jobad_application[userProfileAttached]'][value='custom']",
+        "input[type='radio'][name*='userProfileAttached' i][value='custom']",
+        "input[type='radio'][value='custom'][name*='attached' i]",
+    ):
+        try:
+            radio = fr.locator(sel)
+            if radio.count() > 0:
+                try:
+                    radio.first.check(timeout=3000)
+                except PlaywrightError:
+                    try:
+                        radio.first.check(timeout=3000, force=True)
+                    except PlaywrightError:
+                        try:
+                            radio.first.evaluate(
+                                "(el) => { el.checked = true;"
+                                " el.dispatchEvent(new Event('input', { bubbles: true }));"
+                                " el.dispatchEvent(new Event('change', { bubbles: true })); }"
+                            )
+                        except PlaywrightError:
+                            pass
+                page.wait_for_timeout(400)
+                break
+        except PlaywrightError:
+            continue
+
+    # 2) Fallback: textové tlačítko „Nahrát vlastní životopis" apod.
     patterns = [
         r"Vlastní\s+životopis",
         r"Nahrát\s+vlastní",
@@ -267,9 +297,16 @@ def _fill_visible_input(loc, value: str, *, force: bool = False) -> bool:
     """
     Vyplní pole. Pokud force=False, prázdné pole jen doplní (nepřepíše účtem předvyplněný text).
     U kontaktu z profilu používáme force=True, aby se špatný předvypl z Jobs.cz / microsite přepsal.
+
+    Defense in depth: odmítne honeypot pole (hp_field_input apod.).
     """
     if not value:
         return False
+    try:
+        if _is_honeypot_field(loc):
+            return False
+    except PlaywrightError:
+        pass
     try:
         if not loc.is_visible(timeout=1200):
             return False
@@ -600,11 +637,95 @@ def _fill_message(page, message: str) -> bool:
     return False
 
 
+_HONEYPOT_NAME_PATTERNS = re.compile(
+    r"(^|[_\-\[])(hp|honeypot|hpot|website|url|bot|trap|spam|fax|dont[_\-]?fill|leave[_\-]?blank)"
+    r"([_\-\]]|$)",
+    re.I,
+)
+
+
+def _is_honeypot_field(element) -> bool:
+    """
+    Jobs.cz (a další) přidávají skrytá 'honeypot' pole — musí zůstat prázdná/nedotčená,
+    jinak server označí submission jako bota a odmítne ji.
+    Heuristika: jméno/id/třída elementu NEBO předka obsahuje 'hp_', 'honeypot',
+    'accessibility-hidden', 'visually-hidden', nebo je element skrytý.
+    """
+    try:
+        info = element.evaluate(
+            "(el) => {"
+            " const s = window.getComputedStyle(el);"
+            " const r = el.getBoundingClientRect();"
+            " const classesChain = [];"
+            " const attrsChain = [];"
+            " let node = el;"
+            " let depth = 0;"
+            " while (node && depth < 6) {"
+            "   classesChain.push(node.getAttribute ? (node.getAttribute('class') || '') : '');"
+            "   attrsChain.push(node.getAttribute ? (node.getAttribute('aria-hidden') || '') : '');"
+            "   node = node.parentElement; depth++;"
+            " }"
+            " return {"
+            "   name: (el.getAttribute('name') || ''),"
+            "   id: (el.getAttribute('id') || ''),"
+            "   classChain: classesChain.join(' '),"
+            "   ariaHiddenChain: attrsChain.join(' '),"
+            "   display: s.display,"
+            "   visibility: s.visibility,"
+            "   opacity: s.opacity,"
+            "   width: r.width,"
+            "   height: r.height,"
+            "   offTop: el.offsetTop,"
+            "   offLeft: el.offsetLeft,"
+            " };"
+            "}"
+        ) or {}
+    except PlaywrightError:
+        return False
+
+    name_blob = " ".join([str(info.get("name", "")), str(info.get("id", ""))])
+    class_blob = str(info.get("classChain", ""))
+    if _HONEYPOT_NAME_PATTERNS.search(name_blob):
+        return True
+    if re.search(
+        r"accessibility-hidden|visually-hidden|sr-only|screen-reader|honeypot|is-hidden|hp-field",
+        class_blob,
+        re.I,
+    ):
+        return True
+    # aria-hidden=true na elementu nebo předku
+    if re.search(r"\btrue\b", str(info.get("ariaHiddenChain", "")), re.I):
+        return True
+    if (info.get("display") or "") == "none":
+        return True
+    if (info.get("visibility") or "") == "hidden":
+        return True
+    try:
+        if float(info.get("opacity") or 1) == 0.0:
+            return True
+    except (TypeError, ValueError):
+        pass
+    if (info.get("width") or 0) == 0 and (info.get("height") or 0) == 0:
+        return True
+    if int(info.get("offTop") or 0) < -500 or int(info.get("offLeft") or 0) < -500:
+        return True
+
+    return False
+
+
 def _try_check_checkbox(cb) -> bool:
     """
     Jobs.cz / Alma Career mají nativní <input type=checkbox> často schovaný
     (opacity:0 / display:none) a klikatelný je jen <label>. Neopíráme se o is_visible.
+
+    KRITICKÉ: Odmítáme honeypoty (hp_field_checkbox apod.) — jejich zaškrtnutí
+    způsobí server-side odmítnutí „We ran into a problem submitting the form".
     """
+    try:
+        if _is_honeypot_field(cb):
+            return False
+    except PlaywrightError:
+        pass
     try:
         if cb.is_checked():
             return True
@@ -665,12 +786,14 @@ def _check_application_consents(page) -> None:
             except PlaywrightError:
                 continue
 
-        # 3) Všechny checkboxy ve formuláři (Jobs.cz microsite — bývá jich 2-4)
-        form_boxes = fr.locator("form input[type='checkbox']")
+        # 3) Všechny checkboxy ve formuláři, kromě honeypot kontejnerů Alma Career
+        form_boxes = fr.locator(
+            "form input[type='checkbox']:not(.accessibility-hidden *):not(.visually-hidden *)"
+        )
         for i in range(min(form_boxes.count(), 16)):
             _try_check_checkbox(form_boxes.nth(i))
 
-        # 4) Explicitně required / aria-required
+        # 4) Explicitně required / aria-required (honeypoty required nebývají, ale guard v _try_check_checkbox to jistí)
         required_boxes = fr.locator(
             "input[type='checkbox'][required], input[type='checkbox'][aria-required='true']"
         )
