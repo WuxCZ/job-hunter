@@ -841,12 +841,22 @@ def _gather_visible_text(page) -> str:
 
 
 _ERROR_PATTERNS = re.compile(
-    r"run\s+into\s+some\s+problem|"
+    # Jobs.cz / Alma Career server-side error varianty (CZ + EN):
+    r"(ran?|run)\s+into\s+(a|some|the)\s+problem|"
+    r"problem\s+submitting\s+the\s+form|"
+    r"problem\s+with\s+(your\s+)?(submission|submitting)|"
+    r"we\s+could\s+not\s+submit|we\s+were\s+unable\s+to\s+submit|"
+    r"unable\s+to\s+submit\s+(your\s+)?(form|application)|"
+    r"failed\s+to\s+(submit|process)\s+(your\s+)?(form|application|request)|"
+    # CZ varianty
     r"došlo\s+k\s+chyb|nastala\s+chyba|něco\s+se\s+(pokazilo|nepovedlo)|"
     r"formulář\s+se\s+nepodařilo\s+odesl|nepodařilo\s+se\s+odeslat|"
+    r"(odpověď|přihlášku)\s+se\s+nepodařilo\s+odesl|"
     r"zkuste\s+to\s+(prosím\s+)?(znovu|později)|"
-    r"(chyba\s+serveru|server\s+error|500\s+internal|bad\s+gateway|503\s+service)|"
-    r"something\s+went\s+wrong|error\s+occurred|please\s+try\s+again",
+    # HTTP / server
+    r"(chyba\s+serveru|server\s+error|500\s+internal|bad\s+gateway|503\s+service|504\s+gateway)|"
+    # Obecné EN chyby
+    r"something\s+went\s+wrong|(an\s+)?error\s+occurred|please\s+try\s+again",
     re.I,
 )
 
