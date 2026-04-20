@@ -364,49 +364,128 @@ Odpověz POUZE platným JSON objektem (žádný markdown), přesně tento tvar k
     return False, msg
 
 
+# --- Fit scoring vyladěný na profil: HW, helpdesk/servicedesk L1/L2, Windows Server ---
+#
+# Baseline je schválně LOW (20), aby "IT" samotné nestačilo. Skóre ≥50 vyžaduje
+# alespoň jedno silné plus. Silné minus (manager/konzultant/obchodník/stavař) má
+# masivní dopad, aby nic takového neproleze.
+
+_STRONG_POSITIVE = [
+    # Helpdesk / Servicedesk / L1 L2
+    r"service\s*desk",
+    r"servicedesk",
+    r"helpdesk",
+    r"help\s*desk",
+    r"\bIT\s*support\b",
+    r"\buser\s*support\b",
+    r"desktop\s*support",
+    r"technical\s*support",
+    r"podpora\s*u[žz]ivatel",
+    # L1/L2 / tier
+    r"\bL1\b", r"\bL2\b", r"\btier\s*1\b", r"\btier\s*2\b",
+    # HW technik / hardware / PC
+    r"\bHW\b",
+    r"\bhardware\b",
+    r"pc\s*technik",
+    r"it\s*technik",
+    r"(hardwarov|hw)[ýyé]?\s*technik",
+    r"technik\s*(hw|hardware|pc|it|sít|server|notebook)",
+    # Windows Server / admin
+    r"windows\s*server",
+    r"server(ov|ů)\s*administr",
+    r"(systém|system)[oa]?\s*administr",
+    # Junior varianty obecně
+    r"\bjunior\b",
+]
+
+_MEDIUM_POSITIVE = [
+    r"\btechnik\b",
+    r"\bservis\b",
+    r"\bpodpora\b",
+    r"\badministr[áa]tor\b",
+    r"infrastruktur",
+    r"onsite",
+]
+
+_STRONG_NEGATIVE = [
+    # Management / business role, které NECHCEME
+    r"\bmanager\b", r"\bmana[žz]er\b", r"\bmana[žz]erka\b",
+    r"\bdirector\b", r"\b(ředitel|reditel)\b",
+    r"\bhead\s+of\b", r"\bvedouc[íi]\b",
+    r"\blead\b", r"\bteam\s*lead\b", r"\bteamlead\b",
+    # Consulting / analytika bez IT specifikace
+    r"\bconsult(ant|ing)\b", r"\bkonzultant\b", r"\bkonzultantka\b",
+    r"\barchitect(ure|ect)?\b", r"\barchitekt\b", r"\barchitektka\b",
+    # Recruiter / HR
+    r"\brecruit(er|ment)\b", r"\btalent\s*partner\b", r"\bhr\b", r"\bpersonalist",
+    # Sales / obchod
+    r"\bsales\b", r"\bobchod", r"\bobchodní\b", r"\bobchodnik\b", r"\bobchodnice\b",
+    r"\baccount\s*manager\b", r"\bkey\s*account\b",
+    # Stavebnictví / koordinátor / projektový manažer
+    r"\bstavař\b", r"\bstavební?\b", r"\bstavebn",
+    r"\bkoordinátor", r"\bprojektov[ýa]\s*manažer", r"\bproject\s*manager\b", r"\bscrum\s*master\b",
+    # Vývoj / ne-HW engineer role
+    r"\bdevelop(er|ment)\b", r"\bv[ýy]voj[áa][řr]\b", r"\bprogramátor\b",
+    r"\bsoftware\s*engineer\b", r"\bsoftwarov[ýý]\s*in[žz]en[ýe]r\b",
+    r"\bdata\s*engineer\b", r"\bdevops\s*engineer\b", r"\bsales\s*engineer\b",
+    r"\bcloud\s*engineer\b", r"\bsite\s*reliability\b",
+    # Data / AI / Cloud architect role
+    r"\bdata\s*(scientist|analyst)\b", r"\bmachine\s*learning\b",
+    r"\bcloud\s*architect\b", r"\bdevops\b", r"\bsre\b",
+    # SAP / ERP konzultace (typicky není Windows/HW)
+    r"\bsap\b", r"\berp\b",
+]
+
+_MEDIUM_NEGATIVE = [
+    r"\bsenior\b",
+    r"\banalytik\b",
+    r"\banalyst\b",
+]
+
+
+def _matches_any(title: str, patterns: list[str]) -> list[str]:
+    hits = []
+    for p in patterns:
+        m = re.search(p, title, re.I)
+        if m:
+            hits.append(m.group(0))
+    return hits
+
+
 def evaluate_fit(listing: JobListing) -> tuple[int, str, str]:
-    """Return rough fit score, summary reason and detailed explanation."""
+    """
+    Profil: HW technik / helpdesk / service desk L1 L2 / Windows Server.
+    Baseline 20, silný plus +25, střední +10, silný minus -40, střední -15.
+    """
     title = (listing.title or "").lower()
-    positive_keywords = [
-        "junior",
-        "it support",
-        "helpdesk",
-        "administrator",
-        "analytik",
-        "technik",
-        "specialista",
-        "l1",
-        "l2",
-    ]
-    caution_keywords = [
-        "senior",
-        "lead",
-        "manager",
-        "ředitel",
-        "head of",
-        "architect",
-        "architekt",
-    ]
-    score = 50
-    positives = [kw for kw in positive_keywords if re.search(rf"\b{re.escape(kw)}\b", title)]
-    cautions = [kw for kw in caution_keywords if re.search(rf"\b{re.escape(kw)}\b", title)]
-    score += min(35, len(positives) * 12)
-    score -= min(35, len(cautions) * 15)
+
+    strong_pos = _matches_any(title, _STRONG_POSITIVE)
+    medium_pos = _matches_any(title, _MEDIUM_POSITIVE)
+    strong_neg = _matches_any(title, _STRONG_NEGATIVE)
+    medium_neg = _matches_any(title, _MEDIUM_NEGATIVE)
+
+    score = 20
+    score += min(70, len(strong_pos) * 30)
+    score += min(20, len(medium_pos) * 10)
+    score -= min(70, len(strong_neg) * 40)
+    score -= min(30, len(medium_neg) * 15)
     score = max(0, min(100, score))
 
-    if score >= 70:
-        reason = "Dobrá shoda podle názvu pozice."
-    elif score >= 45:
-        reason = "Střední shoda, doporučena ruční kontrola."
+    if score >= 65:
+        reason = "Silná shoda (helpdesk / HW / Windows Server)."
+    elif score >= 50:
+        reason = "Středně slušná shoda, spíš relevantní."
+    elif score >= 30:
+        reason = "Slabší shoda, nejistá."
     else:
-        reason = "Nízká shoda, spíš přeskočit."
+        reason = "Nízká shoda (manager / obchod / architekt / mimo profil)."
 
-    plus_text = ", ".join(positives) if positives else "žádná silná klíčová slova"
-    minus_text = ", ".join(cautions) if cautions else "žádné varovné seniorní termíny"
+    plus_text = ", ".join(dict.fromkeys(strong_pos + medium_pos)) or "žádná silná klíčová slova"
+    minus_text = ", ".join(dict.fromkeys(strong_neg + medium_neg)) or "žádné výrazné negativní signály"
     details = (
         f"+ Pozitivní signály: {plus_text}\n"
-        f"- Rizikové signály: {minus_text}\n"
-        f"Skóre se počítá z názvu pozice (základ 50, plus za juniorní/IT support výrazy, "
-        f"mínus za senior/manager/lead výrazy)."
+        f"- Negativní signály: {minus_text}\n"
+        f"Profil: HW technik / helpdesk / servicedesk L1 L2 / Windows Server. "
+        f"Baseline 20, silný plus +25, střední +10, silný minus -40, střední -15."
     )
     return score, reason, details
