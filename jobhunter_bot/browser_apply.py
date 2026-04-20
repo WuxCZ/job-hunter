@@ -15,18 +15,143 @@ from jobhunter_bot.apply_failure_dump import record_apply_failure
 from jobhunter_bot.db import JobListing
 
 
+_CHROME_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
+
+# Stealth init-script — přepíše nejběžnější fingerprintovací stopy po Playwright / automation.
+# Spouští se v každém novém dokumentu ještě před tím, než se spustí JS stránky.
+_STEALTH_INIT_SCRIPT = r"""
+(() => {
+  // 1) navigator.webdriver -> undefined
+  try {
+    Object.defineProperty(Navigator.prototype, 'webdriver', {
+      get: () => undefined,
+      configurable: true,
+    });
+  } catch (e) {}
+
+  // 2) window.chrome objekt
+  try {
+    if (!window.chrome) {
+      window.chrome = { runtime: {}, loadTimes: function() {}, csi: function() {} };
+    }
+  } catch (e) {}
+
+  // 3) navigator.plugins - reálný Chrome jich má ~5, typ musí být PluginArray
+  try {
+    const fakePluginArray = Object.create(PluginArray.prototype);
+    const fakePlugins = [
+      { name: 'PDF Viewer', description: 'Portable Document Format', filename: 'internal-pdf-viewer' },
+      { name: 'Chrome PDF Viewer', description: '', filename: 'internal-pdf-viewer' },
+      { name: 'Chromium PDF Viewer', description: '', filename: 'internal-pdf-viewer' },
+      { name: 'Microsoft Edge PDF Viewer', description: '', filename: 'internal-pdf-viewer' },
+      { name: 'WebKit built-in PDF', description: '', filename: 'internal-pdf-viewer' },
+    ];
+    fakePlugins.forEach((pl, idx) => {
+      Object.setPrototypeOf(pl, Plugin.prototype);
+      Object.defineProperty(fakePluginArray, idx, { value: pl, enumerable: true });
+      Object.defineProperty(fakePluginArray, pl.name, { value: pl });
+    });
+    Object.defineProperty(fakePluginArray, 'length', { value: fakePlugins.length });
+    Object.defineProperty(Navigator.prototype, 'plugins', {
+      get: () => fakePluginArray,
+      configurable: true,
+    });
+  } catch (e) {}
+
+  // 4) navigator.languages
+  try {
+    Object.defineProperty(Navigator.prototype, 'languages', {
+      get: () => ['cs-CZ', 'cs', 'en-US', 'en'],
+      configurable: true,
+    });
+  } catch (e) {}
+
+  // 5) Permissions API - Notification.permission
+  try {
+    const origQuery = window.navigator.permissions.query.bind(window.navigator.permissions);
+    window.navigator.permissions.query = (parameters) =>
+      parameters && parameters.name === 'notifications'
+        ? Promise.resolve({ state: Notification.permission })
+        : origQuery(parameters);
+  } catch (e) {}
+
+  // 6) WebGL vendor/renderer - nebýt headless / swiftshader
+  try {
+    const origGetParameter = WebGLRenderingContext.prototype.getParameter;
+    WebGLRenderingContext.prototype.getParameter = function(parameter) {
+      // UNMASKED_VENDOR_WEBGL = 37445, UNMASKED_RENDERER_WEBGL = 37446
+      if (parameter === 37445) return 'Intel Inc.';
+      if (parameter === 37446) return 'Intel Iris OpenGL Engine';
+      return origGetParameter.apply(this, [parameter]);
+    };
+  } catch (e) {}
+
+  // 7) navigator.hardwareConcurrency / deviceMemory
+  try {
+    Object.defineProperty(Navigator.prototype, 'hardwareConcurrency', {
+      get: () => 8, configurable: true,
+    });
+    Object.defineProperty(Navigator.prototype, 'deviceMemory', {
+      get: () => 8, configurable: true,
+    });
+  } catch (e) {}
+
+  // 8) Console warning - některé detekční knihovny testují že console.debug existuje
+  try {
+    if (typeof window.console.debug !== 'function') {
+      window.console.debug = function() {};
+    }
+  } catch (e) {}
+})();
+"""
+
+
 def _launch_chromium(p, *, slow_mo_ms: int = 0, headless: bool = False):
-    """slow_mo_ms > 0 zpomalí všechny akce Playwright (klikání, psaní, navigace) — pro ladění."""
-    kw: dict = {"headless": headless}
+    """
+    Stealth-friendly Chromium:
+    - Vypne automation flagy, které jobs.cz a spol. detekují
+    - Reálný UA, realistické argy
+    - Stealth init-script v každém kontextu (viz apply_new_context_with_stealth).
+    """
+    args = [
+        "--disable-blink-features=AutomationControlled",
+        "--disable-features=IsolateOrigins,site-per-process,AutomationControlled",
+        "--disable-infobars",
+        "--no-default-browser-check",
+        "--no-first-run",
+        "--disable-dev-shm-usage",
+    ]
+    kw: dict = {
+        "headless": headless,
+        "args": args,
+        "ignore_default_args": ["--enable-automation"],
+    }
     if slow_mo_ms > 0:
         kw["slow_mo"] = slow_mo_ms
     return p.chromium.launch(**kw)
 
 
+def _apply_stealth_to_context(context) -> None:
+    """Do každého nového dokumentu vloží anti-detekční init script."""
+    try:
+        context.add_init_script(_STEALTH_INIT_SCRIPT)
+    except PlaywrightError:
+        pass
+
+
 def init_session(storage_state_path: str) -> None:
     with sync_playwright() as p:
         browser = _launch_chromium(p, slow_mo_ms=0)
-        context = browser.new_context()
+        context = browser.new_context(
+            user_agent=_CHROME_UA,
+            locale="cs-CZ",
+            timezone_id="Europe/Prague",
+            viewport={"width": 1366, "height": 900},
+        )
+        _apply_stealth_to_context(context)
         page = context.new_page()
         page.goto("https://www.jobs.cz", wait_until="domcontentloaded")
         print("Přihlas se do Jobs.cz a po dokončení stiskni Enter v terminálu.")
@@ -73,14 +198,43 @@ def _resolve_page_after_apply_click(context, page) -> object:
     return page
 
 
+def _human_click(el, timeout_ms: int = 8000) -> bool:
+    """
+    Humanizovaný klik: scroll do viewportu, mouse hover, krátká pauza, klik.
+    Pomáhá proti bot-detekčním skriptům, které testují event.isTrusted /
+    mousemove patterny.
+    """
+    import random
+
+    try:
+        el.scroll_into_view_if_needed(timeout=3000)
+    except PlaywrightError:
+        pass
+    try:
+        el.hover(timeout=2000)
+    except PlaywrightError:
+        pass
+    # Krátká lidská pauza před kliknutím (150-450 ms)
+    try:
+        import time as _t
+        _t.sleep(random.uniform(0.15, 0.45))
+    except Exception:
+        pass
+    try:
+        el.click(timeout=timeout_ms)
+        return True
+    except (PlaywrightError, PlaywrightTimeoutError):
+        return False
+
+
 def _click_first_visible(locator, timeout_ms: int = 8000) -> bool:
     try:
         n = locator.count()
         for i in range(min(n, 12)):
             el = locator.nth(i)
             if el.is_visible():
-                el.click(timeout=timeout_ms)
-                return True
+                if _human_click(el, timeout_ms):
+                    return True
     except PlaywrightTimeoutError:
         return False
     return False
@@ -293,10 +447,41 @@ def _split_full_name(full: str) -> tuple[str, str]:
     return parts[0], parts[1]
 
 
-def _fill_visible_input(loc, value: str, *, force: bool = False) -> bool:
+def _human_type(loc, value: str, *, per_char_min_ms: int = 35, per_char_max_ms: int = 115) -> bool:
+    """
+    Napodobí lidské psaní: klikne, smaže, pak píše písmenko po písmenku s náhodným delay.
+    Mnohem méně detekovatelné než locator.fill(), který hodí hodnotu najednou.
+    """
+    import random
+
+    try:
+        loc.click(timeout=3000)
+    except PlaywrightError:
+        return False
+    try:
+        # vyber vše a smaž (safeguard, když je pole předvyplněné)
+        loc.press("Control+A", timeout=1500)
+        loc.press("Delete", timeout=1500)
+    except PlaywrightError:
+        pass
+    try:
+        delay = random.randint(per_char_min_ms, per_char_max_ms)
+        loc.type(value, delay=delay, timeout=max(10_000, len(value) * per_char_max_ms + 2000))
+        return True
+    except PlaywrightError:
+        # fallback — instant fill, pokud human typing neprojde
+        try:
+            loc.fill(value, timeout=8000)
+            return True
+        except PlaywrightError:
+            return False
+
+
+def _fill_visible_input(loc, value: str, *, force: bool = False, humanize: bool = False) -> bool:
     """
     Vyplní pole. Pokud force=False, prázdné pole jen doplní (nepřepíše účtem předvyplněný text).
     U kontaktu z profilu používáme force=True, aby se špatný předvypl z Jobs.cz / microsite přepsal.
+    Pokud humanize=True, píše se po písmenku s náhodným delay (méně detekovatelné).
 
     Defense in depth: odmítne honeypot pole (hp_field_input apod.).
     """
@@ -319,6 +504,9 @@ def _fill_visible_input(loc, value: str, *, force: bool = False) -> bool:
             cur = ""
         if (cur or "").strip():
             return True
+    if humanize:
+        if _human_type(loc, value):
+            return True
     try:
         loc.click(timeout=2000)
         loc.fill(value, timeout=10000)
@@ -327,41 +515,41 @@ def _fill_visible_input(loc, value: str, *, force: bool = False) -> bool:
         return False
 
 
-def _try_by_label(frame, value: str, patterns: tuple[str, ...]) -> bool:
+def _try_by_label(frame, value: str, patterns: tuple[str, ...], *, humanize: bool = False) -> bool:
     """Labely typu 'Jméno *', 'Jméno:', 'Jméno' — matchuje bez striktního ^$."""
     if not value:
         return False
     for pat in patterns:
         try:
             loc = frame.get_by_label(re.compile(pat, re.I))
-            if loc.count() > 0 and _fill_visible_input(loc.first, value, force=True):
+            if loc.count() > 0 and _fill_visible_input(loc.first, value, force=True, humanize=humanize):
                 return True
         except PlaywrightError:
             continue
     return False
 
 
-def _try_by_role_textbox(frame, value: str, patterns: tuple[str, ...]) -> bool:
+def _try_by_role_textbox(frame, value: str, patterns: tuple[str, ...], *, humanize: bool = False) -> bool:
     """ARIA přístupné jméno (aria-label / label) přes role=textbox."""
     if not value:
         return False
     for pat in patterns:
         try:
             loc = frame.get_by_role("textbox", name=re.compile(pat, re.I))
-            if loc.count() > 0 and _fill_visible_input(loc.first, value, force=True):
+            if loc.count() > 0 and _fill_visible_input(loc.first, value, force=True, humanize=humanize):
                 return True
         except PlaywrightError:
             continue
     return False
 
 
-def _try_by_selector(frame, value: str, selectors: tuple[str, ...]) -> bool:
+def _try_by_selector(frame, value: str, selectors: tuple[str, ...], *, humanize: bool = False) -> bool:
     if not value:
         return False
     for sel in selectors:
         try:
             fl = frame.locator(sel)
-            if fl.count() > 0 and _fill_visible_input(fl.first, value, force=True):
+            if fl.count() > 0 and _fill_visible_input(fl.first, value, force=True, humanize=humanize):
                 return True
         except PlaywrightError:
             continue
@@ -393,9 +581,9 @@ def _fill_contact_in_frame(frame, first: str, last: str, email: str, phone: str)
     combined_filled = False
     if full:
         combined_filled = (
-            _try_by_label(frame, full, combined_patterns)
-            or _try_by_role_textbox(frame, full, combined_patterns)
-            or _try_by_selector(frame, full, combined_selectors)
+            _try_by_label(frame, full, combined_patterns, humanize=True)
+            or _try_by_role_textbox(frame, full, combined_patterns, humanize=True)
+            or _try_by_selector(frame, full, combined_selectors, humanize=True)
         )
 
     # --- Pokud kombinované pole nenalezeno, zkus dvě samostatná ---
@@ -417,9 +605,9 @@ def _fill_contact_in_frame(frame, first: str, last: str, email: str, phone: str)
             "input[placeholder*='first name' i]",
             "input[placeholder*='jméno' i]:not([placeholder*='příjmení' i]):not([placeholder*='uživatel' i])",
         )
-        _try_by_label(frame, first, first_patterns) \
-            or _try_by_role_textbox(frame, first, first_patterns) \
-            or _try_by_selector(frame, first, first_selectors)
+        _try_by_label(frame, first, first_patterns, humanize=True) \
+            or _try_by_role_textbox(frame, first, first_patterns, humanize=True) \
+            or _try_by_selector(frame, first, first_selectors, humanize=True)
 
         last_patterns = (
             r"^\s*Příjmení\s*[:*]?\s*$",
@@ -438,9 +626,9 @@ def _fill_contact_in_frame(frame, first: str, last: str, email: str, phone: str)
             "input[placeholder*='surname' i]",
             "input[placeholder*='last name' i]",
         )
-        _try_by_label(frame, last, last_patterns) \
-            or _try_by_role_textbox(frame, last, last_patterns) \
-            or _try_by_selector(frame, last, last_selectors)
+        _try_by_label(frame, last, last_patterns, humanize=True) \
+            or _try_by_role_textbox(frame, last, last_patterns, humanize=True) \
+            or _try_by_selector(frame, last, last_selectors, humanize=True)
 
     # --- E-mail ---
     email_patterns = (
@@ -456,9 +644,9 @@ def _fill_contact_in_frame(frame, first: str, last: str, email: str, phone: str)
         "input[placeholder*='email' i]",
         "input[placeholder*='e-mail' i]",
     )
-    _try_by_label(frame, email, email_patterns) \
-        or _try_by_role_textbox(frame, email, email_patterns) \
-        or _try_by_selector(frame, email, email_selectors)
+    _try_by_label(frame, email, email_patterns, humanize=True) \
+        or _try_by_role_textbox(frame, email, email_patterns, humanize=True) \
+        or _try_by_selector(frame, email, email_selectors, humanize=True)
 
     # --- Telefon ---
     phone_patterns = (
@@ -482,9 +670,9 @@ def _fill_contact_in_frame(frame, first: str, last: str, email: str, phone: str)
         "input[placeholder*='telefon' i]",
         "input[placeholder*='phone' i]",
     )
-    _try_by_label(frame, phone, phone_patterns) \
-        or _try_by_role_textbox(frame, phone, phone_patterns) \
-        or _try_by_selector(frame, phone, phone_selectors)
+    _try_by_label(frame, phone, phone_patterns, humanize=True) \
+        or _try_by_role_textbox(frame, phone, phone_patterns, humanize=True) \
+        or _try_by_selector(frame, phone, phone_selectors, humanize=True)
 
 
 def _fill_applicant_contact_fields(page, full_name: str, email: str, phone: str) -> None:
@@ -591,6 +779,8 @@ def _fill_applicant_salary(page, salary: str) -> None:
 
 
 def _fill_message_in_frame(frame, page, message: str) -> bool:
+    import random
+
     selectors = [
         "textarea[name='message']",
         "textarea[name='coverLetter']",
@@ -603,18 +793,30 @@ def _fill_message_in_frame(frame, page, message: str) -> bool:
         for i in range(min(loc.count(), 12)):
             el = loc.nth(i)
             try:
+                if _is_honeypot_field(el):
+                    continue
+            except PlaywrightError:
+                pass
+            try:
                 if not el.is_visible(timeout=800):
                     continue
             except PlaywrightError:
                 continue
             try:
                 el.click(timeout=3000)
-                el.fill(message, timeout=12000)
+                # Smaž existující obsah
+                try:
+                    el.press("Control+A", timeout=1500)
+                    el.press("Delete", timeout=1500)
+                except PlaywrightError:
+                    pass
+                # Humanizované psaní - po písmenku s náhodným delay 20-70ms
+                delay = random.randint(20, 70)
+                page.keyboard.type(message, delay=delay)
                 return True
             except PlaywrightError:
                 try:
-                    el.click(timeout=2000)
-                    page.keyboard.type(message, delay=12)
+                    el.fill(message, timeout=12000)
                     return True
                 except PlaywrightError:
                     continue
@@ -622,8 +824,10 @@ def _fill_message_in_frame(frame, page, message: str) -> bool:
         tb = frame.get_by_role("textbox")
         if tb.count() > 0:
             el = tb.first
-            if el.is_visible(timeout=1200):
-                el.fill(message, timeout=12000)
+            if el.is_visible(timeout=1200) and not _is_honeypot_field(el):
+                el.click(timeout=2000)
+                delay = random.randint(20, 70)
+                page.keyboard.type(message, delay=delay)
                 return True
     except PlaywrightError:
         pass
@@ -1145,7 +1349,20 @@ def apply_to_job(
     with sync_playwright() as p:
         sm = max(0, min(10_000, int(browser_slow_mo_ms)))
         browser = _launch_chromium(p, slow_mo_ms=sm, headless=headless)
-        context = browser.new_context(storage_state=storage_state_path)
+        context = browser.new_context(
+            storage_state=storage_state_path,
+            user_agent=_CHROME_UA,
+            locale="cs-CZ",
+            timezone_id="Europe/Prague",
+            viewport={"width": 1366, "height": 900},
+            extra_http_headers={
+                "Accept-Language": "cs-CZ,cs;q=0.9,en;q=0.7,sk;q=0.5",
+                "Sec-Ch-Ua": '"Chromium";v="131", "Not_A Brand";v="24", "Google Chrome";v="131"',
+                "Sec-Ch-Ua-Mobile": "?0",
+                "Sec-Ch-Ua-Platform": '"Windows"',
+            },
+        )
+        _apply_stealth_to_context(context)
         page = context.new_page()
         page.goto(listing.url, wait_until="load", timeout=90000)
 
