@@ -1,0 +1,37 @@
+# --- Secrets & session (NIKDY necommitovat) ---
+.env
+.env.local
+*.pem
+*.key
+storage-state*.json
+
+# --- Local data ---
+jobhunter.db
+jobhunter*.db
+profiles.json
+
+# --- Debug dumps ---
+debug_apply_failures/
+debug_jobs_history/
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# --- Playwright screenshots / artefakty ---
+playwright-report/
+test-results/

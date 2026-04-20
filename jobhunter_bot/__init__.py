@@ -1,0 +1,1 @@
+"""JobHunter automation package."""

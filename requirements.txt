@@ -1,0 +1,8 @@
+beautifulsoup4
+playwright
+python-dotenv
+google-generativeai
+pillow
+requests
+screeninfo
+customtkinter
