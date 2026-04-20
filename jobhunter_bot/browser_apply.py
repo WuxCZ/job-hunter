@@ -840,8 +840,62 @@ def _gather_visible_text(page) -> str:
     return "\n".join(chunks)
 
 
+_ERROR_PATTERNS = re.compile(
+    r"run\s+into\s+some\s+problem|"
+    r"došlo\s+k\s+chyb|nastala\s+chyba|něco\s+se\s+(pokazilo|nepovedlo)|"
+    r"formulář\s+se\s+nepodařilo\s+odesl|nepodařilo\s+se\s+odeslat|"
+    r"zkuste\s+to\s+(prosím\s+)?(znovu|později)|"
+    r"(chyba\s+serveru|server\s+error|500\s+internal|bad\s+gateway|503\s+service)|"
+    r"something\s+went\s+wrong|error\s+occurred|please\s+try\s+again",
+    re.I,
+)
+
+_SUCCESS_TEXT_PATTERNS = re.compile(
+    r"děkujeme|děkujeme\s+vám|děkujeme,\s*že|"
+    r"vaše\s+(žádost|odpověď|přihláška|reakce)\s+(byla|byly)?\s*(úspěšně\s+)?odesl|"
+    r"žádost\s+(byla\s+)?odesl|odpověď\s+byla\s+odesl|reakce\s+byla\s+(úspěšně\s+)?odesl|"
+    r"životopis\s+(byl\s+)?odeslán|úspěšně\s+odesl(ána|áno|án)|"
+    r"přijali\s+jsme|přihláška\s+byla\s+přijata|"
+    r"thank\s*you\s+for\s+(applying|your\s+application)|"
+    r"application\s+(was\s+)?(received|submitted|sent)|successfully\s+submitted|"
+    r"we\s+(have\s+)?received\s+your\s+(application|response)",
+    re.I,
+)
+
+
+def _page_shows_error(blob: str, page) -> bool:
+    if _ERROR_PATTERNS.search(blob or ""):
+        return True
+    try:
+        err_loc = page.get_by_text(_ERROR_PATTERNS)
+        if err_loc.count() > 0 and err_loc.first.is_visible(timeout=1200):
+            return True
+    except PlaywrightError:
+        pass
+    try:
+        alert = page.locator("[role='alert'], .alert-danger, .error-message, .has-error")
+        for i in range(min(alert.count(), 6)):
+            el = alert.nth(i)
+            try:
+                if el.is_visible(timeout=400):
+                    txt = (el.inner_text(timeout=800) or "").strip()
+                    if txt and _ERROR_PATTERNS.search(txt):
+                        return True
+            except PlaywrightError:
+                continue
+    except PlaywrightError:
+        pass
+    return False
+
+
 def _submission_succeeded(page, start_url: str) -> bool:
-    """URL změna, nebo potvrzovací text (včetně SPA na stejné adrese)."""
+    """
+    Potvrdí úspěch jen když:
+      - je vidět explicitní „děkujeme / odesláno" text, NEBO
+      - URL se změnila na novou cestu, která obsahuje success/thank/dekuj/potvrzeni,
+      - a zároveň stránka NEOBSAHUJE chybovou hlášku („We run into some problem", …).
+    Jinak vrací False a volající zapíše FAIL (žádné falešné „OK odesláno").
+    """
     try:
         page.wait_for_timeout(2600)
     except PlaywrightError:
@@ -851,47 +905,50 @@ def _submission_succeeded(page, start_url: str) -> bool:
     base_start = start_url.split("?")[0].rstrip("/")
     cur_path = current.split("?")[0].rstrip("/")
 
-    if cur_path != base_start:
-        return True
+    blob = _gather_visible_text(page)
 
+    # Tvrdá kontrola chybové stránky — má přednost.
+    if _page_shows_error(blob, page):
+        return False
+
+    # 1) Silná signatura v query-stringu
     try:
-        p0 = urlparse(current)
-        qs = p0.query.lower()
+        qs = urlparse(current).query.lower()
         if any(
             x in qs
-            for x in (
-                "success",
-                "sent",
-                "odeslano",
-                "thank",
-                "dekuji",
-                "děkuj",
-                "confirmed",
-            )
+            for x in ("success", "sent", "odeslano", "thank", "dekuji", "děkuj", "confirmed")
         ):
             return True
     except Exception:
         pass
 
-    blob = _gather_visible_text(page)
-    if re.search(
-        r"děkujeme|děkujeme\s+vám|děkujeme,\s*že|odeslán|odeslána|úspěšně\s+odesl|"
-        r"vaše\s+(žádost|odpověď|přihláška|reakce)|žádost\s+(byla\s+)?odesl|odpověď\s+byla\s+odesl|"
-        r"reakce\s+byla\s+(úspěšně\s+)?odesl|životopis\s+(byl\s+)?odeslán|"
-        r"potvrzení|přijat(a|o)?|přijali\s+jsme|přihláška\s+byla\s+přijata|"
-        r"thank\s*you|application\s+(was\s+)?(received|submitted)|successfully\s+submitted|"
-        r"we\s+(have\s+)?received\s+your",
-        blob,
-        re.I,
-    ):
+    # 2) URL se změnila na „confirmation" cestu
+    if cur_path != base_start:
+        low = cur_path.lower()
+        if any(
+            x in low
+            for x in (
+                "dekujeme",
+                "děkujeme",
+                "thank",
+                "success",
+                "potvrzeni",
+                "confirmation",
+                "sent",
+                "odeslano",
+                "done",
+                "hotovo",
+            )
+        ):
+            return True
+        # URL se změnila, ale neznáme cílovou cestu → musí být potvrzovací text, jinak to
+        # NENÍ signál úspěchu (mohla to být jen chybová stránka nebo cookie banner přesun).
+
+    # 3) Potvrzovací text (nejspolehlivější signál)
+    if _SUCCESS_TEXT_PATTERNS.search(blob):
         return True
 
-    ok_text = page.get_by_text(
-        re.compile(
-            r"děkujeme|odeslán|odeslána|úspěšně|potvrzení|žádost byla|thank you|application (received|submitted)|successfully",
-            re.I,
-        )
-    )
+    ok_text = page.get_by_text(_SUCCESS_TEXT_PATTERNS)
     try:
         if ok_text.count() > 0 and ok_text.first.is_visible(timeout=2500):
             return True
@@ -900,7 +957,9 @@ def _submission_succeeded(page, start_url: str) -> bool:
 
     for fr in page.frames:
         try:
-            if fr.get_by_role("heading", name=re.compile(r"děkujeme|hotovo|thank you", re.I)).count() > 0:
+            if fr.get_by_role(
+                "heading", name=re.compile(r"děkujeme|hotovo|thank you", re.I)
+            ).count() > 0:
                 return True
         except PlaywrightError:
             continue

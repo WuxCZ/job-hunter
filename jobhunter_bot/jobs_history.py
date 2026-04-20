@@ -31,16 +31,30 @@ _CHROME_UA = DEFAULT_HEADERS.get(
 
 
 def _rpd_urls_from_html(html: str) -> set[str]:
-    """Vytáhne /rpd/ID z celého HTML (odkazy i JSON v __NEXT_DATA__), když selžou běžné <a>."""
+    """Vytáhne /rpd/ID z celého HTML. Jobs.cz v roce 2026 už přímo /rpd/ linky neukazuje;
+    místo nich je `data-jobad-id="..."` + `/osobni/historie-odpovedi/<id>/`. Vše mapujeme
+    zpět na kanonickou formu `https://www.jobs.cz/rpd/<id>/`.
+    """
     out: set[str] = set()
     if not html:
         return out
+
+    # Klasické /rpd/ID (staré layouty)
     for m in re.finditer(r"https?://(?:www\.)?jobs\.cz/rpd/(\d+)", html, re.I):
         out.add(normalize_job_url(m.group(0)))
     for m in re.finditer(r'["\'](?:https://(?:www\.)?jobs\.cz)?/rpd/(\d+)/?["\']', html, re.I):
         out.add(normalize_job_url(f"https://www.jobs.cz/rpd/{m.group(1)}/"))
     for m in re.finditer(r"/rpd/(\d+)(?:/|[\"'\s<>])", html):
         out.add(normalize_job_url(f"https://www.jobs.cz/rpd/{m.group(1)}/"))
+
+    # Nový layout Historie odpovědí: data-jobad-id="...", data-adid="..."
+    for m in re.finditer(r'data-(?:jobad-id|adid|ad-id|job-ad-id)\s*=\s*"(\d{6,})"', html, re.I):
+        out.add(normalize_job_url(f"https://www.jobs.cz/rpd/{m.group(1)}/"))
+
+    # Odkazy typu /osobni/historie-odpovedi/<id>/
+    for m in re.finditer(r"/osobni/historie-odpovedi/(\d{6,})/?", html, re.I):
+        out.add(normalize_job_url(f"https://www.jobs.cz/rpd/{m.group(1)}/"))
+
     return out
 
 
@@ -175,8 +189,8 @@ def fetch_applied_rpd_urls(
 
             try:
                 page.wait_for_selector(
-                    'a[href*="/rpd/"], script#__NEXT_DATA__, [data-testid*="response"], '
-                    '[data-testid*="answer"]',
+                    'a[href*="/rpd/"], a[href*="/osobni/historie-odpovedi/"], '
+                    '[data-jobad-id], script#__NEXT_DATA__',
                     timeout=15000,
                 )
             except PlaywrightTimeoutError:
@@ -188,7 +202,9 @@ def fetch_applied_rpd_urls(
                 found |= _rpd_urls_from_html(html)
                 found |= _rpd_urls_from_next_data(html)
 
-                links = page.locator('a[href*="/rpd/"]')
+                links = page.locator(
+                    'a[href*="/rpd/"], a[href*="/osobni/historie-odpovedi/"], [data-jobad-id]'
+                )
                 try:
                     n = links.count()
                 except Exception:
@@ -196,9 +212,14 @@ def fetch_applied_rpd_urls(
                 for i in range(n):
                     try:
                         href = links.nth(i).get_attribute("href")
-                        if href:
+                        if href and ("/rpd/" in href or "/historie-odpovedi/" in href):
                             full = urljoin("https://www.jobs.cz", href)
-                            found.add(normalize_job_url(full))
+                            found |= _rpd_urls_from_html(full)
+                        dj = links.nth(i).get_attribute("data-jobad-id")
+                        if dj and dj.isdigit():
+                            found.add(
+                                normalize_job_url(f"https://www.jobs.cz/rpd/{dj}/")
+                            )
                     except Exception:
                         continue
 

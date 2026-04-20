@@ -118,23 +118,39 @@ def cmd_run(
             sender_name=name_apply,
         )
         apply_info: list[str] = []
-        ok, apply_err = apply_to_job(
-            listing=listing,
-            cv_path=cfg.cv_path,
-            storage_state_path=cfg.storage_state_path,
-            message=message,
-            dry_run=dry_run,
-            browser_slow_mo_ms=sm,
-            applicant_full_name=name_apply,
-            applicant_email=email_apply,
-            applicant_phone=os.getenv("APPLICANT_PHONE", "").strip(),
-            applicant_salary=os.getenv("APPLICANT_SALARY", "").strip(),
-            gemini_api_key=cfg.gemini_api_key,
-            gemini_model=cfg.gemini_model,
-            info_log=apply_info,
-            skip_gemini_form_check=skip_gemini_form_check,
-            headless=headless,
-        )
+        try:
+            ok, apply_err = apply_to_job(
+                listing=listing,
+                cv_path=cfg.cv_path,
+                storage_state_path=cfg.storage_state_path,
+                message=message,
+                dry_run=dry_run,
+                browser_slow_mo_ms=sm,
+                applicant_full_name=name_apply,
+                applicant_email=email_apply,
+                applicant_phone=os.getenv("APPLICANT_PHONE", "").strip(),
+                applicant_salary=os.getenv("APPLICANT_SALARY", "").strip(),
+                gemini_api_key=cfg.gemini_api_key,
+                gemini_model=cfg.gemini_model,
+                info_log=apply_info,
+                skip_gemini_form_check=skip_gemini_form_check,
+                headless=headless,
+            )
+        except Exception as apply_exc:
+            for line in apply_info:
+                print(line)
+            failed_count += 1
+            print(
+                f"FAIL (výjimka): {listing.title} — "
+                f"{apply_exc.__class__.__name__}: {apply_exc}"
+            )
+            try:
+                db.record_apply_failure(
+                    listing, f"crash: {apply_exc.__class__.__name__}: {apply_exc}"
+                )
+            except Exception:
+                pass
+            continue
         for line in apply_info:
             print(line)
         if ok:

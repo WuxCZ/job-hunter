@@ -923,22 +923,40 @@ class JobHunterModernGUI:
                         return self.pending_decision or "skip"
 
                 apply_info: list[str] = []
-                ok, apply_err = apply_to_job(
-                    listing=listing,
-                    cv_path=profile.cv_path,
-                    storage_state_path=profile.jobs_storage_state_path,
-                    message=message,
-                    dry_run=dry,
-                    browser_slow_mo_ms=slow_mo,
-                    applicant_full_name=name_for_apply,
-                    applicant_email=email_for_apply,
-                    applicant_phone=phone_for_apply,
-                    applicant_salary=salary_for_apply,
-                    gemini_api_key=self.cfg.gemini_api_key,
-                    gemini_model=self.cfg.gemini_model,
-                    info_log=apply_info,
-                    approval_callback=approval_cb,
-                )
+                try:
+                    ok, apply_err = apply_to_job(
+                        listing=listing,
+                        cv_path=profile.cv_path,
+                        storage_state_path=profile.jobs_storage_state_path,
+                        message=message,
+                        dry_run=dry,
+                        browser_slow_mo_ms=slow_mo,
+                        applicant_full_name=name_for_apply,
+                        applicant_email=email_for_apply,
+                        applicant_phone=phone_for_apply,
+                        applicant_salary=salary_for_apply,
+                        gemini_api_key=self.cfg.gemini_api_key,
+                        gemini_model=self.cfg.gemini_model,
+                        info_log=apply_info,
+                        approval_callback=approval_cb,
+                    )
+                except Exception as apply_exc:
+                    for line in apply_info:
+                        self.events.put(("log", line))
+                    try:
+                        self.db.record_apply_failure(
+                            listing, f"crash: {apply_exc.__class__.__name__}: {apply_exc}"
+                        )
+                    except Exception:
+                        pass
+                    self.events.put(("failures", ""))
+                    self.events.put(
+                        (
+                            "log",
+                            f"FAIL (výjimka): {listing.title} — {apply_exc.__class__.__name__}: {apply_exc}",
+                        )
+                    )
+                    continue
                 for line in apply_info:
                     self.events.put(("log", line))
 

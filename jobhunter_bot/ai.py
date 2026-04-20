@@ -311,12 +311,21 @@ Odpověz POUZE platným JSON objektem (žádný markdown), přesně tento tvar k
         from PIL import Image
 
         image = Image.open(io.BytesIO(png))
+        gen_kwargs: dict = {
+            "temperature": 0.15,
+            # Gemini 2.5-flash má „thinking" tokeny — musí se vejít i s reálnou odpovědí.
+            "max_output_tokens": 2048,
+            "response_mime_type": "application/json",
+        }
+        try:
+            generation_config = genai.types.GenerationConfig(**gen_kwargs)
+        except TypeError:
+            # Starší verze knihovny (bez response_mime_type) — fallback
+            gen_kwargs.pop("response_mime_type", None)
+            generation_config = genai.types.GenerationConfig(**gen_kwargs)
         resp = model.generate_content(
             [prompt, image],
-            generation_config=genai.types.GenerationConfig(
-                temperature=0.15,
-                max_output_tokens=700,
-            ),
+            generation_config=generation_config,
         )
         raw = (resp.text or "").strip()
     except Exception as exc:
@@ -324,7 +333,11 @@ Odpověz POUZE platným JSON objektem (žádný markdown), přesně tento tvar k
 
     parsed = _parse_json_object_from_gemini(raw)
     if not isinstance(parsed, dict):
-        return None, "Kontrola Gemini: model nevrátil rozumný JSON (zkontroluj ručně)."
+        snippet = (raw or "").replace("\n", " ")[:180]
+        return None, (
+            "Kontrola Gemini: model nevrátil rozumný JSON (zkontroluj ručně)."
+            + (f" | ukázka: {snippet}" if snippet else "")
+        )
 
     ready = parsed.get("ready")
     issues = parsed.get("issues") or []
