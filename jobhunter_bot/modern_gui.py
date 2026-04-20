@@ -58,6 +58,12 @@ class JobHunterModernGUI:
         self.applicant_email_var = ctk.StringVar(value="")
         self.applicant_phone_var = ctk.StringVar(value="")
         self.applicant_salary_var = ctk.StringVar(value="50000")
+        # --- Safe mode: rozumné brzdy, aby bot nedělal spam a nespadl do banu ---
+        self.safe_mode_var = ctk.BooleanVar(value=True)
+        self.min_fit_var = ctk.IntVar(value=50)
+        self.max_apply_var = ctk.IntVar(value=50)
+        self.pause_seconds_var = ctk.IntVar(value=15)
+        self.max_consecutive_fails_var = ctk.IntVar(value=5)
         self.status_var = ctk.StringVar(value="Připraven")
 
         ctk.set_appearance_mode("dark")
@@ -156,6 +162,24 @@ class JobHunterModernGUI:
         ).pack(side=tk.LEFT, padx=(4, 8))
         ctk.CTkLabel(debug_row, text="ms:").pack(side=tk.LEFT)
         ctk.CTkEntry(debug_row, textvariable=self.browser_slow_mo_var, width=56).pack(side=tk.LEFT, padx=(4, 12))
+
+        safe_row = ctk.CTkFrame(parent, fg_color="transparent")
+        safe_row.pack(fill=tk.X, padx=8, pady=(4, 6))
+        ctk.CTkCheckBox(
+            safe_row,
+            text="Safe mode (doporučeno)",
+            variable=self.safe_mode_var,
+        ).pack(side=tk.LEFT, padx=(4, 14))
+        ctk.CTkLabel(safe_row, text="min fit").pack(side=tk.LEFT)
+        ctk.CTkEntry(safe_row, textvariable=self.min_fit_var, width=48).pack(side=tk.LEFT, padx=(4, 10))
+        ctk.CTkLabel(safe_row, text="max odeslání").pack(side=tk.LEFT)
+        ctk.CTkEntry(safe_row, textvariable=self.max_apply_var, width=54).pack(side=tk.LEFT, padx=(4, 10))
+        ctk.CTkLabel(safe_row, text="pauza mezi pokusy (s)").pack(side=tk.LEFT)
+        ctk.CTkEntry(safe_row, textvariable=self.pause_seconds_var, width=48).pack(side=tk.LEFT, padx=(4, 10))
+        ctk.CTkLabel(safe_row, text="stop po FAILech v řadě").pack(side=tk.LEFT)
+        ctk.CTkEntry(safe_row, textvariable=self.max_consecutive_fails_var, width=40).pack(
+            side=tk.LEFT, padx=(4, 10)
+        )
 
         content = ctk.CTkFrame(parent, corner_radius=10)
         content.pack(fill=tk.BOTH, expand=True, padx=8, pady=(4, 8))
@@ -828,6 +852,26 @@ class JobHunterModernGUI:
             self.events.put(("log", f"Načteno pozic: {len(listings)} | {search_url}"))
             mode = self.mode_var.get()
 
+            # --- Safe-mode parametry (platí i v manual režimu, aby měl uživatel brzdy) ---
+            safe_mode = bool(self.safe_mode_var.get())
+            min_fit = max(0, int(self.min_fit_var.get() or 0)) if safe_mode else 0
+            max_apply = max(1, int(self.max_apply_var.get() or 9999)) if safe_mode else 9999
+            pause_seconds = max(0, int(self.pause_seconds_var.get() or 0)) if safe_mode else 0
+            max_consecutive_fails = (
+                max(1, int(self.max_consecutive_fails_var.get() or 5)) if safe_mode else 10_000
+            )
+            if safe_mode:
+                self.events.put(
+                    (
+                        "log",
+                        f"Safe mode: min fit={min_fit}, max odeslání={max_apply}, "
+                        f"pauza={pause_seconds}s, stop po {max_consecutive_fails} FAILech v řadě.",
+                    )
+                )
+            apply_attempts = 0
+            consecutive_fails = 0
+            import time as _time
+
             for listing in listings:
                 if self.stop_event.is_set():
                     break
@@ -873,6 +917,38 @@ class JobHunterModernGUI:
                     self.events.put(("summary_chunk", f"(Souhrn: {exc})\n\n" + detail.format_text()))
 
                 score, reason, fit_details = evaluate_fit(listing)
+
+                if safe_mode and score < min_fit:
+                    if not dry:
+                        self.db.mark_skipped(listing)
+                    self.events.put(
+                        (
+                            "log",
+                            f"SKIP (fit {score} < min {min_fit}): {listing.title}",
+                        )
+                    )
+                    self._sync_close_preview_from_worker()
+                    continue
+
+                if apply_attempts >= max_apply:
+                    self.events.put(
+                        (
+                            "log",
+                            f"Safe mode: dosažen limit max odeslání = {max_apply}. Ukončuji běh.",
+                        )
+                    )
+                    break
+
+                if apply_attempts > 0 and pause_seconds > 0:
+                    self.events.put(
+                        ("log", f"Safe mode: pauza {pause_seconds}s před dalším pokusem…")
+                    )
+                    for _ in range(pause_seconds * 2):
+                        if self.stop_event.is_set():
+                            break
+                        _time.sleep(0.5)
+                    if self.stop_event.is_set():
+                        break
 
                 self._sync_close_preview_from_worker()
 
@@ -975,14 +1051,56 @@ class JobHunterModernGUI:
                     )
                     continue
 
+                apply_attempts += 1
+
+                # Retry once na server chybu (jobs.cz občas vrátí „We run into some problem")
+                if not ok and apply_err and "server chyba" in apply_err.lower() and not dry:
+                    self.events.put(
+                        (
+                            "log",
+                            f"Retry za 60s: {listing.title} (server chyba jobs.cz)",
+                        )
+                    )
+                    for _ in range(120):
+                        if self.stop_event.is_set():
+                            break
+                        _time.sleep(0.5)
+                    if not self.stop_event.is_set():
+                        retry_info: list[str] = []
+                        try:
+                            ok, apply_err = apply_to_job(
+                                listing=listing,
+                                cv_path=profile.cv_path,
+                                storage_state_path=profile.jobs_storage_state_path,
+                                message=message,
+                                dry_run=dry,
+                                browser_slow_mo_ms=slow_mo,
+                                applicant_full_name=name_for_apply,
+                                applicant_email=email_for_apply,
+                                applicant_phone=phone_for_apply,
+                                applicant_salary=salary_for_apply,
+                                gemini_api_key=self.cfg.gemini_api_key,
+                                gemini_model=self.cfg.gemini_model,
+                                info_log=retry_info,
+                                approval_callback=None,  # retry bez manuálního schválení
+                                skip_gemini_form_check=True,  # nepotřebujeme znovu validovat
+                            )
+                        except Exception as retry_exc:
+                            apply_err = f"retry selhal: {retry_exc}"
+                            ok = False
+                        for line in retry_info:
+                            self.events.put(("log", f"[retry] {line}"))
+
                 if dry and ok:
                     self.events.put(
                         ("log", f"DRY RUN: {listing.title} — {apply_err or 'bez zápisu do DB'}")
                     )
                 elif ok:
                     self.db.mark_applied(listing)
+                    consecutive_fails = 0
                     self.events.put(("log", f"OK odesláno (potvrzeno): {listing.title} (fit {score})"))
                 else:
+                    consecutive_fails += 1
                     try:
                         self.db.record_apply_failure(listing, apply_err)
                     except Exception:
@@ -991,6 +1109,15 @@ class JobHunterModernGUI:
                     self.events.put(
                         ("log", f"FAIL odeslání: {listing.title} (fit {score}) — {apply_err}")
                     )
+                    if safe_mode and consecutive_fails >= max_consecutive_fails:
+                        self.events.put(
+                            (
+                                "log",
+                                f"Safe mode: {consecutive_fails} FAILů v řadě → HARD STOP. "
+                                "Zkontroluj diagnostiku v záložce Selhání.",
+                            )
+                        )
+                        break
 
             self.events.put(("log", "Běh dokončen."))
         except Exception as exc:

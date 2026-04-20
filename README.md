@@ -151,6 +151,12 @@ Start.bat
 - **Dry: ignorovat duplicity v DB** — pro opakovaný test stejných inzerátů
 - **Preview na 2. monitor** — otevře inzerát v samostatném Chrome okně vedle
 - **Start / Stop / Obnovit historii**
+- **Safe mode** (doporučeno, zapnuté defaultně): rozumné brzdy proti banu
+  - `min fit` (default 50) — bot přeskočí inzeráty s fit score pod prahem
+  - `max odeslání` (default 50) — tvrdý limit odeslání v jednom běhu
+  - `pauza mezi pokusy` (default 15 s) — rate-limit mezi přihláškami
+  - `stop po FAILech v řadě` (default 5) — po tolika chybách po sobě se běh zastaví (čekej, než vyprší server error / změníš nastavení)
+  - při chybě serveru jobs.cz („We run into some problem") bot automaticky zkusí odeslání **ještě jednou po 60s**
 
 V manuálním režimu se u každého inzerátu objeví box **„Čeká na schválení"**:
 
@@ -285,6 +291,24 @@ jobhunter.db                   # lokální DB inzerátů + odpovědí
 debug_apply_failures/          # screenshoty + HTML z neúspěšných odeslání
 debug_jobs_history/            # snapshoty historie Jobs.cz pro ladění
 ```
+
+---
+
+## Údržba & cleanup
+
+### Vyčištění falešných "applied" v DB
+
+Bot dřív uměl falešně označit odeslání jako úspěšné (od commitu `bcaa52a` už to dělat nebude). Pokud máš staré záznamy, spusť:
+
+```powershell
+# Dry-run (jen vypíše):
+python -m tools.clean_false_applied
+
+# Skutečně zapsat:
+python -m tools.clean_false_applied --apply
+```
+
+Skript si stáhne tvou reálnou historii z Jobs.cz a srovná s lokální DB. Falešná „applied" přeřadí na `failed`, nesmyslná URL na `skipped`.
 
 ---
 

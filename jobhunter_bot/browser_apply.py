@@ -1150,10 +1150,21 @@ def apply_to_job(
                 pass
 
             if not _submission_succeeded(page, start_url):
+                # Rozlišíme server chybu (má smysl zkusit znovu) od „nevíme":
+                try:
+                    blob_after = _gather_visible_text(page)
+                except Exception:
+                    blob_after = ""
+                if _page_shows_error(blob_after, page):
+                    return _apply_fail(
+                        page,
+                        listing,
+                        'server chyba jobs.cz (We run into some problem) - vhodne pro retry',
+                    )
                 return _apply_fail(
                     page,
                     listing,
-                    "odeslání nepotvrzeno (stejná URL a nenašel jsem text „děkujeme“ — zkontroluj ručně v prohlížeči)",
+                    'odeslani nepotvrzeno (stejna URL a nenasel jsem text "dekujeme" - zkontroluj rucne v prohlizeci)',
                 )
             return True, ""
         finally:
