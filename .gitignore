@@ -10,9 +10,10 @@ jobhunter.db
 jobhunter*.db
 profiles.json
 
-# --- Debug dumps ---
+# --- Debug dumps & runtime logs ---
 debug_apply_failures/
 debug_jobs_history/
+tools/night_logs/
 
 # --- Python ---
 __pycache__/

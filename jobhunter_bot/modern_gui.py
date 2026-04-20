@@ -109,6 +109,13 @@ class JobHunterModernGUI:
         )
         self.status_chip.pack(side=tk.RIGHT, padx=12, pady=10)
 
+        ctk.CTkLabel(
+            header,
+            text="Made by Wux with \u2665",
+            font=ctk.CTkFont(size=11),
+            text_color=("gray40", "gray60"),
+        ).pack(side=tk.RIGHT, padx=(0, 14))
+
         self.tabs = ctk.CTkTabview(self.root, corner_radius=12)
         self.tabs.pack(fill=tk.BOTH, expand=True, padx=14, pady=(0, 14))
         self.tabs.add("Dashboard")

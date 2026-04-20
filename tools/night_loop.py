@@ -98,6 +98,12 @@ def _run_once(iteration: int) -> int:
 
     env_py = sys.executable
 
+    import os as _os
+
+    env = _os.environ.copy()
+    env["PYTHONUNBUFFERED"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
+
     with log_path.open("w", encoding="utf-8") as log_file:
         proc = subprocess.Popen(
             [env_py, "-u", "main.py", *RUN_ARGS],
@@ -106,6 +112,9 @@ def _run_once(iteration: int) -> int:
             stderr=subprocess.STDOUT,
             text=True,
             bufsize=1,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
         )
         try:
             if proc.stdout is None:
@@ -126,9 +135,17 @@ def _run_once(iteration: int) -> int:
     return applied
 
 
+_BANNER = r"""
+==============================================================
+   JOB HUNTER - AUTO mode smyčka
+   Made by Wux with <3
+=============================================================="""
+
+
 def main() -> int:
     _prevent_windows_sleep()
-    print(f"Noční smyčka startuje {datetime.now():%Y-%m-%d %H:%M:%S}")
+    print(_BANNER)
+    print(f"Start: {datetime.now():%Y-%m-%d %H:%M:%S}")
     print(
         f"Plán: max {MAX_ITERATIONS} iterací, mezi běhy {SLEEP_BETWEEN_RUNS_SECONDS // 60} min, "
         f"stop v {STOP_HOUR:02d}:{STOP_MINUTE:02d}"

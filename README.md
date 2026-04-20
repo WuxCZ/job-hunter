@@ -91,6 +91,8 @@ První, co udělej po spuštění GUI:
 4. Na dashboardu zapni **Dry run** a dej **Start**. Otestuj pár inzerátů v manuálním režimu.
 5. Když to sedí, vypni Dry run a pusť auto.
 
+**Chceš to nechat běžet přes noc bez klikání?** Dvojklik `AUTO.bat` v rootu — viz [AUTO mode sekce](#auto-mode-smyčka-přes-noc) níže.
+
 ---
 
 ## Konfigurace (`.env`)
@@ -372,8 +374,44 @@ Zkontroluj, že máš Windows Terminal / PowerShell s UTF-8 kódováním. `Start
 
 ---
 
+## AUTO mode (smyčka přes noc)
+
+Pro kamoše nebo pro dávkové noční běhy je v repu **dvoudílné řešení**:
+
+- **`AUTO.bat`** (v kořeni repa) — dvojkliknutím otevře viditelné okno a pouští smyčku:
+  - max 16 iterací, mezi nimi 40min pauza, tvrdý stop v 08:00
+  - každá iterace: `python main.py run --max-apply 30 --min-fit 50 --pause-seconds 20 --max-consecutive-fails 5`
+  - Windows sleep je uzamčen (SetThreadExecutionState API, bez potřeby admina)
+  - auto-stop po 3 iteracích v řadě bez jediného odeslání (došla nabídka)
+- **`WATCH.bat`** — otevře druhé okno s **live tail** nejnovějšího `tools/night_logs/run_XX_*.log`. Vidíš každý SKIP / OK / FAIL v reálném čase bez nutnosti otevírat hlavní okno smyčky.
+
+Typický workflow:
+
+```text
+1. dvojklik AUTO.bat     → okno 1: smyčka běží
+2. dvojklik WATCH.bat    → okno 2: live log
+3. jdi spát              → počítač nespí (sleep zamčen Pythonem)
+4. ráno zkoukni výsledky  → tools/night_logs/run_01..NN_*.log
+```
+
+Konfigurace smyčky je v `tools/night_loop.py`:
+
+```python
+MAX_ITERATIONS = 16
+SLEEP_BETWEEN_RUNS_SECONDS = 40 * 60
+STOP_HOUR = 8
+STOP_MINUTE = 0
+RUN_ARGS = ["run", "--limit", "2000", "--max-apply", "30", ...]
+```
+
+Uprav, commitni, kamoš pullne a jede.
+
+---
+
 ## Autor
 
 **Marek Šolc** — [WuxCZ](https://github.com/WuxCZ)
+
+Made by Wux with ♥
 
 PR / issue vítány.
