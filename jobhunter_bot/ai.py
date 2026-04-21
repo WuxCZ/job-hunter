@@ -3,8 +3,11 @@ from __future__ import annotations
 import io
 import json
 import re
+import warnings
 
-import google.generativeai as genai
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore", FutureWarning)
+    import google.generativeai as genai
 
 from collections.abc import Iterator
 

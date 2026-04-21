@@ -1,23 +1,15 @@
 @echo off
-chcp 65001 > nul
 title JobHunter - LIVE log
-cd /d "%~dp0tools\night_logs"
+cd /d "%~dp0"
+set PYTHONIOENCODING=utf-8
 
-echo.
-echo ==============================================================
-echo   JOB HUNTER - LIVE log viewer    Made by Wux with ^<3
-echo ==============================================================
-echo.
-echo Sleduju nejnovejsi run log + watchdog heartbeaty.
-echo Zavreni okna tohle sledovani zastavi (smycka bezi nezavisle).
-echo.
-
-if not exist run_*.log (
+if not exist "tools\night_logs\run_*.log" (
+    echo.
     echo Zadny run_*.log zatim neexistuje. Spust AUTO.bat v root slozce.
+    echo.
     pause
-    exit /b
+    exit /b 1
 )
 
-powershell -NoProfile -Command "$run = Get-ChildItem 'run_*.log' | Sort-Object LastWriteTime -Descending | Select-Object -First 1; $wdPath = 'watchdog.log'; Write-Host \"=== Sleduji run: $($run.Name) ===\" -ForegroundColor Cyan; if (Test-Path $wdPath) { Write-Host \"=== + watchdog heartbeats ===\" -ForegroundColor Yellow }; Get-Content $run.FullName -Wait -Tail 80"
-
-pause
+python -u "tools\watch_tail.py"
+if errorlevel 1 pause
