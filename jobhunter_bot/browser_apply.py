@@ -142,6 +142,13 @@ def _launch_chromium(p, *, slow_mo_ms: int = 0, headless: bool = False):
     return p.chromium.launch(**kw)
 
 
+def _apply_trace(info_log: list[str] | None, message: str) -> None:
+    """Krátké milníky do info_log → CLI/GUI vypisují průběh jedné přihlášky jako u debug."""
+    if info_log is None:
+        return
+    info_log.append(f"[Aplikace] {message}")
+
+
 def _pick_free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
@@ -1716,6 +1723,8 @@ def apply_to_job(
         )
 
     start_url = listing.url.split("#")[0]
+    _title = (listing.title or "(bez názvu)")[:72]
+    _apply_trace(info_log, f"Start přihlášky — {_title}")
 
     want_detach = bool(leave_browser_open_on_failure and not headless and not dry_run)
     browser = None
@@ -1779,6 +1788,7 @@ def apply_to_job(
         )
         page = _first_or_new_page(context)
         page.goto(listing.url, wait_until="load", timeout=90000)
+        _apply_trace(info_log, "Inzerát načten, hledám „Odpovědět“ / vstup do formuláře.")
 
         def _inner_apply() -> tuple[bool, str]:
             nonlocal page
@@ -1791,6 +1801,7 @@ def apply_to_job(
                 )
 
             page = _resolve_page_after_apply_click(context, page)
+            _apply_trace(info_log, "Formulář odpovědi otevřen, vyplňuji kontakt a zprávu.")
 
             try:
                 page.wait_for_selector(
@@ -1833,6 +1844,7 @@ def apply_to_job(
                     listing,
                     "nepodařilo se nahrát PDF (žádný vhodný file input / iframe)",
                 )
+            _apply_trace(info_log, "CV nahráno, dokončuji pole a souhlasy.")
 
             try:
                 page.wait_for_timeout(1200)
@@ -1851,6 +1863,7 @@ def apply_to_job(
                 _fill_applicant_salary(page, applicant_salary)
 
             _check_application_consents(page)
+            _apply_trace(info_log, "Souhlasy zkontrolovány, před odesláním.")
 
             try:
                 page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
@@ -1860,6 +1873,7 @@ def apply_to_job(
             ready: bool | None = None
             gemini_msg = ""
             if not skip_gemini_form_check:
+                _apply_trace(info_log, "Kontrola formuláře (Gemini)…")
                 ready, gemini_msg = gemini_validate_application_form(
                     gemini_api_key, gemini_model, page
                 )
@@ -1898,11 +1912,13 @@ def apply_to_job(
                     page.wait_for_timeout(500)
                 except PlaywrightError:
                     pass
+                _apply_trace(info_log, "Dry-run: finální odeslání přeskočeno.")
                 return (
                     True,
                     "dry-run: kontakt + zpráva + CV vyplněny, finální odeslání přeskočeno",
                 )
 
+            _apply_trace(info_log, "Odesílám přihlášku (finální tlačítko / více kroků)…")
             if not _submit_application_with_retries(page):
                 _try_gemini_self_heal_after_failure(
                     page,
@@ -1928,6 +1944,7 @@ def apply_to_job(
             except PlaywrightTimeoutError:
                 pass
 
+            _apply_trace(info_log, "Čekám na potvrzení odeslání ze serveru…")
             if not _submission_succeeded(page, start_url):
                 # Rozlišíme server chybu (má smysl zkusit znovu) od „nevíme":
                 try:

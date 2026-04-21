@@ -130,6 +130,18 @@ def _run_once(iteration: int) -> int:
         finally:
             proc.wait()
 
+    rc = proc.returncode if proc is not None else -1
+    end_line = (
+        f"\n### JOBHUNTER_NIGHT_ITER_END iteration={iteration} child_rc={rc} "
+        f"ts={datetime.now().isoformat(timespec='seconds')} ###\n"
+    )
+    print(end_line, end="", flush=True)
+    try:
+        with log_path.open("a", encoding="utf-8") as log_append:
+            log_append.write(end_line)
+    except OSError:
+        pass
+
     applied = _count_applied(log_path)
     print(f"\nIterace {iteration} hotová. Reálně odesláno: {applied}")
     return applied
