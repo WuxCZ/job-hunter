@@ -65,6 +65,7 @@ class JobHunterModernGUI:
         self.pause_seconds_var = ctk.IntVar(value=15)
         self.max_consecutive_fails_var = ctk.IntVar(value=5)
         self.leave_browser_open_var = ctk.BooleanVar(value=False)
+        self.auto_recover_after_fail_var = ctk.BooleanVar(value=True)
         self.status_var = ctk.StringVar(value="Připraven")
 
         ctk.set_appearance_mode("dark")
@@ -204,6 +205,11 @@ class JobHunterModernGUI:
             safe_row,
             text="Při FAIL ponechat Chrome otevřený (CDP) — doplníš ručně, běh pokračuje dál",
             variable=self.leave_browser_open_var,
+        ).pack(side=tk.LEFT, padx=(8, 4))
+        ctk.CTkCheckBox(
+            safe_row,
+            text="Auto-obnova po FAIL (druhý pokus bez Gemini check; AI asistent z kódu spustit nejde)",
+            variable=self.auto_recover_after_fail_var,
         ).pack(side=tk.LEFT, padx=(8, 4))
 
         content = ctk.CTkFrame(parent, corner_radius=10)
@@ -1119,6 +1125,51 @@ class JobHunterModernGUI:
                             ok = False
                         for line in retry_info:
                             self.events.put(("log", f"[retry] {line}"))
+
+                if (
+                    not ok
+                    and not dry
+                    and bool(self.auto_recover_after_fail_var.get())
+                    and apply_err
+                    and apply_err not in ("__manual_stop__", "__manual_skip__")
+                ):
+                    self.events.put(
+                        (
+                            "log",
+                            f"Auto-obnova: druhý pokus za 6s — {listing.title}",
+                        )
+                    )
+                    for _ in range(12):
+                        if self.stop_event.is_set():
+                            break
+                        _time.sleep(0.5)
+                    if not self.stop_event.is_set():
+                        recover_info: list[str] = []
+                        recover_sm = max(slow_mo, 350)
+                        try:
+                            ok, apply_err = apply_to_job(
+                                listing=listing,
+                                cv_path=profile.cv_path,
+                                storage_state_path=profile.jobs_storage_state_path,
+                                message=message,
+                                dry_run=dry,
+                                browser_slow_mo_ms=recover_sm,
+                                applicant_full_name=name_for_apply,
+                                applicant_email=email_for_apply,
+                                applicant_phone=phone_for_apply,
+                                applicant_salary=salary_for_apply,
+                                gemini_api_key=self.cfg.gemini_api_key,
+                                gemini_model=self.cfg.gemini_model,
+                                info_log=recover_info,
+                                approval_callback=None,
+                                skip_gemini_form_check=True,
+                                leave_browser_open_on_failure=False,
+                            )
+                        except Exception as rec_exc:
+                            ok = False
+                            apply_err = f"auto-obnova selhala: {rec_exc}"
+                        for line in recover_info:
+                            self.events.put(("log", f"[auto-obnova] {line}"))
 
                 if dry and ok:
                     self.events.put(

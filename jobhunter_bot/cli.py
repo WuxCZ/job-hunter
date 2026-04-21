@@ -62,6 +62,7 @@ def cmd_run(
     max_apply: int = 50,
     pause_seconds: int = 15,
     max_consecutive_fails: int = 5,
+    auto_recover_after_fail: bool = False,
 ) -> None:
     cfg = load_config()
     db = Database(cfg.db_path)
@@ -216,12 +217,43 @@ def cmd_run(
                     info_log=retry_info,
                     skip_gemini_form_check=True,
                     headless=headless,
+                    leave_browser_open_on_failure=False,
                 )
             except Exception as retry_exc:
                 ok = False
                 apply_err = f"retry selhal: {retry_exc}"
             for line in retry_info:
                 print(f"[retry] {line}")
+
+        if auto_recover_after_fail and not ok and not dry_run and apply_err:
+            print(f"Auto-obnova: druhý pokus za 6s — {listing.title}")
+            time.sleep(6)
+            recover_info: list[str] = []
+            recover_sm = max(sm, 350)
+            try:
+                ok, apply_err = apply_to_job(
+                    listing=listing,
+                    cv_path=cfg.cv_path,
+                    storage_state_path=cfg.storage_state_path,
+                    message=message,
+                    dry_run=dry_run,
+                    browser_slow_mo_ms=recover_sm,
+                    applicant_full_name=name_apply,
+                    applicant_email=email_apply,
+                    applicant_phone=os.getenv("APPLICANT_PHONE", "").strip(),
+                    applicant_salary=os.getenv("APPLICANT_SALARY", "").strip(),
+                    gemini_api_key=cfg.gemini_api_key,
+                    gemini_model=cfg.gemini_model,
+                    info_log=recover_info,
+                    skip_gemini_form_check=True,
+                    headless=headless,
+                    leave_browser_open_on_failure=False,
+                )
+            except Exception as rec_exc:
+                ok = False
+                apply_err = f"auto-obnova selhala: {rec_exc}"
+            for line in recover_info:
+                print(f"[auto-obnova] {line}")
 
         if ok:
             if not dry_run:
@@ -309,6 +341,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=5,
         help="Safe mode: hard stop po N FAILech v řadě",
     )
+    run_p.add_argument(
+        "--auto-recover",
+        action="store_true",
+        help="Po FAIL jednou zopakovat celé apply (bez Gemini kontroly; pomalejší slow-mo)",
+    )
 
     sub.add_parser("gui")
     sub.add_parser("show-config")
@@ -334,6 +371,12 @@ def main() -> None:
         if getattr(args, "ignore_db", False) and not args.dry_run:
             print("--ignore-db je povolené jen s --dry-run.")
             sys.exit(2)
+        env_auto_recover = os.environ.get("JOBHUNTER_AUTO_RECOVER", "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
         cmd_run(
             args.limit,
             args.dry_run,
@@ -346,6 +389,7 @@ def main() -> None:
             max_apply=getattr(args, "max_apply", 50),
             pause_seconds=getattr(args, "pause_seconds", 15),
             max_consecutive_fails=getattr(args, "max_consecutive_fails", 5),
+            auto_recover_after_fail=bool(getattr(args, "auto_recover", False) or env_auto_recover),
         )
     elif args.command == "gui":
         launch_gui()

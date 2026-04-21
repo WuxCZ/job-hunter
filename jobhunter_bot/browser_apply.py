@@ -1654,6 +1654,18 @@ def apply_to_job(
                         listing,
                         'server chyba jobs.cz (We run into some problem) - vhodne pro retry',
                     )
+                # SPA / microsite někdy doplní „děkujeme“ až po dalším ticku — zkusíme znovu před FAIL.
+                for extra_ms in (4000, 8000):
+                    try:
+                        page.wait_for_timeout(extra_ms)
+                    except PlaywrightError:
+                        pass
+                    try:
+                        page.wait_for_load_state("networkidle", timeout=12000)
+                    except PlaywrightTimeoutError:
+                        pass
+                    if _submission_succeeded(page, start_url):
+                        return True, ""
                 return _apply_fail(
                     page,
                     listing,
