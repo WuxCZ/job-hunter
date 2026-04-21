@@ -64,6 +64,7 @@ class JobHunterModernGUI:
         self.max_apply_var = ctk.IntVar(value=50)
         self.pause_seconds_var = ctk.IntVar(value=15)
         self.max_consecutive_fails_var = ctk.IntVar(value=5)
+        self.leave_browser_open_var = ctk.BooleanVar(value=False)
         self.status_var = ctk.StringVar(value="Připraven")
 
         ctk.set_appearance_mode("dark")
@@ -140,6 +141,18 @@ class JobHunterModernGUI:
             width=170,
         ).pack(side=tk.LEFT, padx=(0, 12))
 
+        ctk.CTkLabel(
+            controls,
+            text=(
+                "Auto zde = bez kroku „Schválit“, jinak stejný běh jako Manual (Safe mode). "
+                "AUTO.bat v kořeni projektu je zvlášť (watchdog + noční smyčka) — není totéž."
+            ),
+            font=ctk.CTkFont(size=11),
+            text_color=("gray55", "gray65"),
+            anchor="w",
+            justify="left",
+        ).pack(side=tk.LEFT, padx=(0, 10), fill=tk.X, expand=True)
+
         ctk.CTkLabel(controls, text="Limit").pack(side=tk.LEFT)
         ctk.CTkEntry(controls, textvariable=self.limit_var, width=58).pack(side=tk.LEFT, padx=(6, 12))
         ctk.CTkCheckBox(controls, text="Dry run", variable=self.dry_run_var).pack(side=tk.LEFT, padx=(0, 8))
@@ -187,6 +200,11 @@ class JobHunterModernGUI:
         ctk.CTkEntry(safe_row, textvariable=self.max_consecutive_fails_var, width=40).pack(
             side=tk.LEFT, padx=(4, 10)
         )
+        ctk.CTkCheckBox(
+            safe_row,
+            text="Při FAIL ponechat Chrome otevřený (CDP) — doplníš ručně, běh pokračuje dál",
+            variable=self.leave_browser_open_var,
+        ).pack(side=tk.LEFT, padx=(8, 4))
 
         content = ctk.CTkFrame(parent, corner_radius=10)
         content.pack(fill=tk.BOTH, expand=True, padx=8, pady=(4, 8))
@@ -1022,6 +1040,9 @@ class JobHunterModernGUI:
                         gemini_model=self.cfg.gemini_model,
                         info_log=apply_info,
                         approval_callback=approval_cb,
+                        leave_browser_open_on_failure=bool(
+                            self.leave_browser_open_var.get()
+                        ),
                     )
                 except Exception as apply_exc:
                     for line in apply_info:
@@ -1091,6 +1112,7 @@ class JobHunterModernGUI:
                                 info_log=retry_info,
                                 approval_callback=None,  # retry bez manuálního schválení
                                 skip_gemini_form_check=True,  # nepotřebujeme znovu validovat
+                                leave_browser_open_on_failure=False,
                             )
                         except Exception as retry_exc:
                             apply_err = f"retry selhal: {retry_exc}"

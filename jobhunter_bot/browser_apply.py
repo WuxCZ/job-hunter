@@ -2,7 +2,14 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
+import socket
+import subprocess
+import sys
+import tempfile
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -132,6 +139,73 @@ def _launch_chromium(p, *, slow_mo_ms: int = 0, headless: bool = False):
     if slow_mo_ms > 0:
         kw["slow_mo"] = slow_mo_ms
     return p.chromium.launch(**kw)
+
+
+def _pick_free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return int(s.getsockname()[1])
+
+
+def _find_chrome_exe() -> Path | None:
+    """Systémový Chrome nebo Edge (Windows) — pro CDP režim „nechat okno otevřené“."""
+    if sys.platform == "win32":
+        pf = os.environ.get("PROGRAMFILES", r"C:\Program Files")
+        pf86 = os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)")
+        for rel in (
+            Path(pf) / "Google" / "Chrome" / "Application" / "chrome.exe",
+            Path(pf86) / "Google" / "Chrome" / "Application" / "chrome.exe",
+            Path(pf) / "Microsoft" / "Edge" / "Application" / "msedge.exe",
+        ):
+            if rel.is_file():
+                return rel
+        return None
+    for p in (
+        Path("/usr/bin/google-chrome-stable"),
+        Path("/usr/bin/google-chrome"),
+        Path("/usr/bin/chromium"),
+        Path("/usr/bin/chromium-browser"),
+        Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+    ):
+        if p.is_file():
+            return p
+    return None
+
+
+def _spawn_chrome_cdp(chrome_exe: Path, port: int, user_data_dir: Path) -> subprocess.Popen:
+    args = [
+        str(chrome_exe),
+        f"--remote-debugging-port={port}",
+        f"--user-data-dir={str(user_data_dir)}",
+        "--no-first-run",
+        "--disable-popup-blocking",
+        "--disable-extensions",
+    ]
+    kwargs: dict = {
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+    }
+    if sys.platform == "win32":
+        CREATE_BREAKAWAY_FROM_JOB = 0x01000000
+        detached = getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+        kwargs["creationflags"] = CREATE_BREAKAWAY_FROM_JOB | detached
+        kwargs["close_fds"] = True
+    else:
+        kwargs["start_new_session"] = True
+    return subprocess.Popen(args, **kwargs)
+
+
+def _wait_cdp_ready(port: int, timeout: float = 75.0) -> bool:
+    url = f"http://127.0.0.1:{port}/json/version"
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            with urllib.request.urlopen(url, timeout=2) as resp:
+                if resp.getcode() == 200:
+                    return True
+        except (urllib.error.URLError, TimeoutError, OSError):
+            time.sleep(0.35)
+    return False
 
 
 def _apply_stealth_to_context(context) -> None:
@@ -1329,9 +1403,14 @@ def apply_to_job(
     skip_gemini_form_check: bool = False,
     headless: bool = False,
     approval_callback=None,
+    leave_browser_open_on_failure: bool = False,
 ) -> tuple[bool, str]:
     """
     Vrátí (True, "") při úspěchu, jinak (False, krátký důvod pro log).
+
+    leave_browser_open_on_failure: při neúspěchu zkusí systémový Chrome/Edge s CDP,
+    po skončení Playwright odpojí bez zavření oken — formulář můžeš doplnit ručně.
+    Ignuje se v headless a dry-run. Když CDP nelze nastartovat, použije se běžný Chromium.
     """
     cv_file = Path(cv_path)
     if not cv_file.exists():
@@ -1346,9 +1425,59 @@ def apply_to_job(
 
     start_url = listing.url.split("#")[0]
 
-    with sync_playwright() as p:
-        sm = max(0, min(10_000, int(browser_slow_mo_ms)))
-        browser = _launch_chromium(p, slow_mo_ms=sm, headless=headless)
+    want_detach = bool(leave_browser_open_on_failure and not headless and not dry_run)
+    browser = None
+    context = None
+    chrome_proc: subprocess.Popen | None = None
+    temp_uds: Path | None = None
+    use_cdp = False
+    detach_requested = False
+    sm = max(0, min(10_000, int(browser_slow_mo_ms)))
+    pw = None
+
+    try:
+        pw = sync_playwright().start()
+        if want_detach:
+            chrome_exe = _find_chrome_exe()
+            if chrome_exe is not None:
+                cd_port = _pick_free_port()
+                temp_uds = Path(tempfile.mkdtemp(prefix="jobhunter_cdp_"))
+                chrome_proc = None
+                try:
+                    chrome_proc = _spawn_chrome_cdp(chrome_exe, cd_port, temp_uds)
+                except OSError:
+                    chrome_proc = None
+                ok_cdp = (
+                    chrome_proc is not None
+                    and chrome_proc.poll() is None
+                    and _wait_cdp_ready(cd_port)
+                )
+                if not ok_cdp:
+                    if chrome_proc is not None and chrome_proc.poll() is None:
+                        try:
+                            chrome_proc.terminate()
+                            chrome_proc.wait(timeout=12)
+                        except Exception:
+                            pass
+                    chrome_proc = None
+                    if temp_uds is not None:
+                        shutil.rmtree(temp_uds, ignore_errors=True)
+                        temp_uds = None
+                    if info_log is not None:
+                        info_log.append(
+                            "Režim „ponechat prohlížeč“: CDP se nerozběhlo — používám vestavěný Chromium; okno se po běhu zavře."
+                        )
+                else:
+                    use_cdp = True
+                    browser = pw.chromium.connect_over_cdp(f"http://127.0.0.1:{cd_port}")
+            elif info_log is not None:
+                info_log.append(
+                    "Režim „ponechat prohlížeč“: není Chrome/Edge v očekávaných cestách — používám vestavěný Chromium."
+                )
+
+        if browser is None:
+            browser = _launch_chromium(pw, slow_mo_ms=sm, headless=headless)
+
         context = browser.new_context(
             storage_state=storage_state_path,
             user_agent=_CHROME_UA,
@@ -1366,7 +1495,9 @@ def apply_to_job(
         page = context.new_page()
         page.goto(listing.url, wait_until="load", timeout=90000)
 
-        try:
+        def _inner_apply() -> tuple[bool, str]:
+            nonlocal page
+
             if not _try_click_apply_entry(page):
                 return _apply_fail(
                     page,
@@ -1517,6 +1648,48 @@ def apply_to_job(
                     'odeslani nepotvrzeno (stejna URL a nenasel jsem text "dekujeme" - zkontroluj rucne v prohlizeci)',
                 )
             return True, ""
-        finally:
-            context.close()
-            browser.close()
+
+        result = _inner_apply()
+        detach_requested = (
+            want_detach
+            and use_cdp
+            and (not result[0])
+            and (result[1] or "") != "__manual_stop__"
+        )
+        return result
+
+    finally:
+        if detach_requested:
+            try:
+                if browser is not None:
+                    browser.disconnect()
+            except Exception:
+                pass
+            if info_log is not None:
+                info_log.append(
+                    "Prohlížeč zůstává otevřený — můžeš ručně doplnit/odeslat; až skončíš, zavři Chrome (Edge)."
+                )
+        else:
+            try:
+                if context is not None:
+                    context.close()
+            except Exception:
+                pass
+            try:
+                if browser is not None:
+                    browser.close()
+            except Exception:
+                pass
+            try:
+                if chrome_proc is not None and chrome_proc.poll() is None:
+                    chrome_proc.terminate()
+                    chrome_proc.wait(timeout=20)
+            except Exception:
+                pass
+            if temp_uds is not None and temp_uds.exists():
+                shutil.rmtree(temp_uds, ignore_errors=True)
+        try:
+            if pw is not None:
+                pw.stop()
+        except Exception:
+            pass

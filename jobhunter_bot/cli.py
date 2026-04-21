@@ -144,6 +144,9 @@ def cmd_run(
         sm = max(0, min(10_000, int(browser_slow_mo_ms)))
         if sm:
             print(f"Debug: prohlížeč slow-mo={sm} ms")
+        leave_browser_on_fail = os.environ.get(
+            "JOBHUNTER_LEAVE_BROWSER_ON_FAIL", ""
+        ).strip().lower() in ("1", "true", "yes", "on")
         email_apply = os.getenv("APPLICANT_EMAIL", "").strip() or (cfg.imap_user or "").strip()
         name_apply = os.getenv("APPLICANT_FULL_NAME", "").strip()
         message = build_message(
@@ -170,6 +173,7 @@ def cmd_run(
                 info_log=apply_info,
                 skip_gemini_form_check=skip_gemini_form_check,
                 headless=headless,
+                leave_browser_open_on_failure=leave_browser_on_fail,
             )
         except Exception as apply_exc:
             for line in apply_info:
