@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -17,7 +18,7 @@ from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
-from jobhunter_bot.ai import gemini_validate_application_form
+from jobhunter_bot.ai import gemini_self_heal_plan, gemini_validate_application_form
 from jobhunter_bot.apply_failure_dump import record_apply_failure
 from jobhunter_bot.db import JobListing
 
@@ -1395,6 +1396,208 @@ def _submission_succeeded(page, start_url: str) -> bool:
     return False
 
 
+def _attach_browser_context(
+    browser,
+    *,
+    use_cdp: bool,
+    storage_state_path: str,
+):
+    """
+    U CDP použij existující kontext prohlížeče + cookies ze storage state (méně „prázdných“ oken
+    než new_context, které umí otevřít druhé okno).
+    """
+    extra_http_headers = {
+        "Accept-Language": "cs-CZ,cs;q=0.9,en;q=0.7,sk;q=0.5",
+        "Sec-Ch-Ua": '"Chromium";v="131", "Not_A Brand";v="24", "Google Chrome";v="131"',
+        "Sec-Ch-Ua-Mobile": "?0",
+        "Sec-Ch-Ua-Platform": '"Windows"',
+    }
+    if use_cdp:
+        try:
+            cxs = list(browser.contexts)
+        except Exception:
+            cxs = []
+        if cxs:
+            ctx = cxs[0]
+            try:
+                data = json.loads(Path(storage_state_path).read_text(encoding="utf-8"))
+                cookies = data.get("cookies") or []
+                if cookies:
+                    ctx.add_cookies(cookies)
+            except Exception:
+                pass
+            _apply_stealth_to_context(ctx)
+            return ctx
+    ctx = browser.new_context(
+        storage_state=storage_state_path,
+        user_agent=_CHROME_UA,
+        locale="cs-CZ",
+        timezone_id="Europe/Prague",
+        viewport={"width": 1366, "height": 900},
+        extra_http_headers=extra_http_headers,
+    )
+    _apply_stealth_to_context(ctx)
+    return ctx
+
+
+def _first_or_new_page(context) -> object:
+    try:
+        if context.pages:
+            p = context.pages[0]
+            try:
+                p.bring_to_front()
+            except PlaywrightError:
+                pass
+            return p
+    except PlaywrightError:
+        pass
+    return context.new_page()
+
+
+def _execute_self_heal_plan(
+    page,
+    plan: dict,
+    *,
+    applicant_full_name: str,
+    applicant_email: str,
+    applicant_phone: str,
+    applicant_salary: str,
+) -> None:
+    if not isinstance(plan, dict):
+        return
+    if plan.get("scroll_to_bottom"):
+        try:
+            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        except PlaywrightError:
+            pass
+        try:
+            page.wait_for_timeout(500)
+        except PlaywrightError:
+            pass
+    if plan.get("scroll_to_top"):
+        try:
+            page.evaluate("window.scrollTo(0, 0)")
+        except PlaywrightError:
+            pass
+        try:
+            page.wait_for_timeout(400)
+        except PlaywrightError:
+            pass
+    if plan.get("refill_contact"):
+        _fill_applicant_contact_fields(page, applicant_full_name, applicant_email, applicant_phone)
+        if applicant_salary:
+            _fill_applicant_salary(page, applicant_salary)
+    if plan.get("recheck_consents"):
+        _check_application_consents(page)
+    subs = plan.get("click_button_substrings") or []
+    if not isinstance(subs, list):
+        return
+    for raw in subs[:6]:
+        if not isinstance(raw, str):
+            continue
+        s = raw.strip()
+        if not s or len(s) > 80:
+            continue
+        pat = re.compile(re.escape(s), re.I)
+        clicked = False
+        for fr in page.frames:
+            try:
+                btn = fr.get_by_role("button", name=pat)
+                if btn.count() > 0:
+                    el = btn.first
+                    if el.is_visible(timeout=900):
+                        el.click(timeout=8000)
+                        clicked = True
+                        break
+            except PlaywrightError:
+                continue
+        if clicked:
+            try:
+                page.wait_for_timeout(700)
+            except PlaywrightError:
+                pass
+            continue
+        for fr in page.frames:
+            try:
+                loc = fr.locator("button, a[role='button'], input[type='submit']").filter(
+                    has_text=pat
+                )
+                if loc.count() > 0 and loc.first.is_visible(timeout=600):
+                    loc.first.click(timeout=8000)
+                    try:
+                        page.wait_for_timeout(700)
+                    except PlaywrightError:
+                        pass
+                    break
+            except PlaywrightError:
+                continue
+
+
+def _try_gemini_self_heal_after_failure(
+    page,
+    listing: JobListing,
+    *,
+    failure_hint_cs: str,
+    gemini_api_key: str,
+    gemini_model: str,
+    applicant_full_name: str,
+    applicant_email: str,
+    applicant_phone: str,
+    applicant_salary: str,
+    info_log: list[str] | None,
+) -> bool:
+    if os.environ.get("GEMINI_SELF_HEAL", "1").strip().lower() in (
+        "0",
+        "false",
+        "no",
+        "off",
+    ):
+        if info_log is not None:
+            info_log.append("Gemini self-heal: vypnuto (GEMINI_SELF_HEAL=0).")
+        return False
+    if not (gemini_api_key or "").strip():
+        return False
+    try:
+        plan, msg = gemini_self_heal_plan(
+            gemini_api_key,
+            gemini_model,
+            page,
+            failure_reason_cs=failure_hint_cs,
+            listing_title=listing.title or "",
+        )
+    except Exception as exc:
+        if info_log is not None:
+            info_log.append(f"Gemini self-heal: výjimka {exc.__class__.__name__}: {exc}")
+        return False
+    if info_log is not None and msg:
+        info_log.append(msg)
+    if not isinstance(plan, dict):
+        return False
+    analysis = str(plan.get("analysis_cs") or "").strip()
+    if analysis and info_log is not None:
+        info_log.append(f"Gemini self-heal: {analysis[:420]}")
+    has_actions = (
+        bool(plan.get("scroll_to_bottom"))
+        or bool(plan.get("scroll_to_top"))
+        or bool(plan.get("refill_contact"))
+        or bool(plan.get("recheck_consents"))
+        or bool(plan.get("click_button_substrings"))
+    )
+    if not has_actions:
+        if info_log is not None:
+            info_log.append("Gemini self-heal: model nenavrhl žádný krok.")
+        return False
+    _execute_self_heal_plan(
+        page,
+        plan,
+        applicant_full_name=applicant_full_name,
+        applicant_email=applicant_email,
+        applicant_phone=applicant_phone,
+        applicant_salary=applicant_salary,
+    )
+    return True
+
+
 def apply_to_job(
     listing: JobListing,
     cv_path: str,
@@ -1490,21 +1693,12 @@ def apply_to_job(
         if browser is None:
             browser = _launch_chromium(pw, slow_mo_ms=sm, headless=headless)
 
-        context = browser.new_context(
-            storage_state=storage_state_path,
-            user_agent=_CHROME_UA,
-            locale="cs-CZ",
-            timezone_id="Europe/Prague",
-            viewport={"width": 1366, "height": 900},
-            extra_http_headers={
-                "Accept-Language": "cs-CZ,cs;q=0.9,en;q=0.7,sk;q=0.5",
-                "Sec-Ch-Ua": '"Chromium";v="131", "Not_A Brand";v="24", "Google Chrome";v="131"',
-                "Sec-Ch-Ua-Mobile": "?0",
-                "Sec-Ch-Ua-Platform": '"Windows"',
-            },
+        context = _attach_browser_context(
+            browser,
+            use_cdp=use_cdp,
+            storage_state_path=storage_state_path,
         )
-        _apply_stealth_to_context(context)
-        page = context.new_page()
+        page = _first_or_new_page(context)
         page.goto(listing.url, wait_until="load", timeout=90000)
 
         def _inner_apply() -> tuple[bool, str]:
@@ -1631,11 +1825,24 @@ def apply_to_job(
                 )
 
             if not _submit_application_with_retries(page):
-                return _apply_fail(
+                _try_gemini_self_heal_after_failure(
                     page,
                     listing,
-                    "není finální odeslání (zkus Debug slow-mo; může být více kroků nebo jiný text tlačítka)",
+                    failure_hint_cs="není vidět finální Odeslat / submit nebo vícekrokový formulář",
+                    gemini_api_key=gemini_api_key,
+                    gemini_model=gemini_model,
+                    applicant_full_name=applicant_full_name,
+                    applicant_email=applicant_email,
+                    applicant_phone=applicant_phone,
+                    applicant_salary=applicant_salary,
+                    info_log=info_log,
                 )
+                if not _submit_application_with_retries(page):
+                    return _apply_fail(
+                        page,
+                        listing,
+                        "není finální odeslání (zkus Debug slow-mo; může být více kroků nebo jiný text tlačítka)",
+                    )
 
             try:
                 page.wait_for_load_state("networkidle", timeout=18000)
@@ -1656,6 +1863,34 @@ def apply_to_job(
                     )
                 # SPA / microsite někdy doplní „děkujeme“ až po dalším ticku — zkusíme znovu před FAIL.
                 for extra_ms in (4000, 8000):
+                    try:
+                        page.wait_for_timeout(extra_ms)
+                    except PlaywrightError:
+                        pass
+                    try:
+                        page.wait_for_load_state("networkidle", timeout=12000)
+                    except PlaywrightTimeoutError:
+                        pass
+                    if _submission_succeeded(page, start_url):
+                        return True, ""
+                _try_gemini_self_heal_after_failure(
+                    page,
+                    listing,
+                    failure_hint_cs="odeslání nepotvrzeno — stejná URL, chybí děkovací text; zkus opravit formulář",
+                    gemini_api_key=gemini_api_key,
+                    gemini_model=gemini_model,
+                    applicant_full_name=applicant_full_name,
+                    applicant_email=applicant_email,
+                    applicant_phone=applicant_phone,
+                    applicant_salary=applicant_salary,
+                    info_log=info_log,
+                )
+                if _submit_application_with_retries(page):
+                    try:
+                        page.wait_for_load_state("networkidle", timeout=18000)
+                    except PlaywrightTimeoutError:
+                        pass
+                for extra_ms in (3500, 7000):
                     try:
                         page.wait_for_timeout(extra_ms)
                     except PlaywrightError:

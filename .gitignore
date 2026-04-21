@@ -14,6 +14,7 @@ profiles.json
 debug_apply_failures/
 debug_jobs_history/
 tools/night_logs/
+tools/last_failure_for_cursor.json
 
 # --- Python ---
 __pycache__/

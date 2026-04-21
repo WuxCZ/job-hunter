@@ -367,6 +367,102 @@ Odpověz POUZE platným JSON objektem (žádný markdown), přesně tento tvar k
     return False, msg
 
 
+def gemini_self_heal_plan(
+    api_key: str,
+    model_name: str,
+    page: object,
+    *,
+    failure_reason_cs: str,
+    listing_title: str,
+) -> tuple[dict | None, str]:
+    """
+    Jednorázový návrh „co zkusit“ na formuláři po selhání (screenshot + stav polí).
+    Vrací (plan_dict | None, řádek_do_logu). Osobní údaje model nevymýšlí — jen zda znovu
+    vyplnit kontakt / souhlasy / scroll / kliknout na tlačítka podle viditelného textu.
+    """
+    if not (api_key or "").strip():
+        return None, ""
+
+    try:
+        payload = page.evaluate(_FORM_STATE_JS)
+    except Exception as exc:
+        payload = {"fields": [], "visibleErrorTexts": [], "form_read_error": str(exc)}
+
+    try:
+        png = page.screenshot(type="png", full_page=True, timeout=60000)
+    except Exception:
+        try:
+            png = page.screenshot(type="png", timeout=30000)
+        except Exception as exc2:
+            return None, f"Gemini self-heal: screenshot selhal ({exc2})"
+
+    try:
+        png = _resize_png_for_gemini(png)
+    except Exception:
+        pass
+
+    prompt = f"""Jsi asistent pro opravu přihláškového formuláře (ČR, Jobs.cz / Alma Career).
+
+Kontext:
+- Pozice (titulek): {listing_title}
+- Poslední problém bota (česky): {failure_reason_cs}
+
+Strukturovaná pole z DOM (viditelné inputy/textarea/select — prázdná vs vyplněná):
+{json.dumps(payload, ensure_ascii=False, indent=2)}
+
+Úkol: Navrhni bezpečné kroky, které může automat zkusit znovu (žádné vymýšlení jména/e-mailu — to bot doplní sám ze svého profilu).
+
+Odpověz POUZE platným JSON (žádný markdown), přesně tyto klíče:
+{{
+  "analysis_cs": "1–4 věty česky: co na stránce nejspíš blokuje odeslání",
+  "scroll_to_bottom": true nebo false,
+  "scroll_to_top": true nebo false,
+  "refill_contact": true nebo false,
+  "recheck_consents": true nebo false,
+  "click_button_substrings": ["např. Odeslat", "Pokračovat"]
+}}
+
+Pravidla:
+- refill_contact=true jen když JSON ukazuje prázdná povinná textová pole (jméno/e-mail/telefon).
+- recheck_consents=true když chybí GDPR / souhlas checkboxy.
+- click_button_substrings: max 4 krátké řetězce viditelného textu tlačítek (česky nebo anglicky), žádné CSS selektory.
+- scroll_to_bottom=true když finální tlačítko může být mimo viewport.
+"""
+
+    genai.configure(api_key=api_key)
+    model = genai.GenerativeModel(model_name=model_name)
+    try:
+        from PIL import Image
+
+        image = Image.open(io.BytesIO(png))
+        gen_kwargs: dict = {
+            "temperature": 0.2,
+            "max_output_tokens": 2048,
+            "response_mime_type": "application/json",
+        }
+        try:
+            generation_config = genai.types.GenerationConfig(**gen_kwargs)
+        except TypeError:
+            gen_kwargs.pop("response_mime_type", None)
+            generation_config = genai.types.GenerationConfig(**gen_kwargs)
+        resp = model.generate_content(
+            [prompt, image],
+            generation_config=generation_config,
+        )
+        raw = (resp.text or "").strip()
+    except Exception as exc:
+        return None, f"Gemini self-heal: API selhalo ({exc})"
+
+    parsed = _parse_json_object_from_gemini(raw)
+    if not isinstance(parsed, dict):
+        snippet = (raw or "").replace("\n", " ")[:160]
+        return None, (
+            "Gemini self-heal: model nevrátil JSON."
+            + (f" Ukázka: {snippet}" if snippet else "")
+        )
+    return parsed, "Gemini self-heal: plán přijat, provádím kroky…"
+
+
 # --- Fit scoring vyladěný na profil: HW, helpdesk/servicedesk L1/L2, Windows Server ---
 #
 # Baseline je schválně LOW (20), aby "IT" samotné nestačilo. Skóre ≥50 vyžaduje

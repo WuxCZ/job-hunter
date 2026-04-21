@@ -111,7 +111,7 @@ CV_PATH=C:\Users\tvuj_uzivatel\Documents\CV.pdf
 
 # Gemini API klíč (volitelné)
 GEMINI_API_KEY=
-GEMINI_MODEL=gemini-2.5-flash
+GEMINI_MODEL=gemini-2.5-pro
 
 # IMAP pro kontrolu přijatých odpovědí (volitelné)
 IMAP_HOST=imap.seznam.cz
@@ -257,9 +257,11 @@ Gemini se používá jen na **dvě** věci (ne na psaní dopisu):
 2. **Validace vyplněného formuláře** — pošle screenshot + stav DOM (label, placeholder, hodnota, required, chybové hlášky) a vrátí `{ "ready": true/false, "msg": "…" }`.
 
 - Když `FORM_VALIDATE_STRICT=1` a Gemini řekne „neúplný", bot **odmítne odeslat**. Default je `0` (logne warning, ale odešle).
+- Po selhání odeslání bot jednou zkusí **Gemini self-heal** (screenshot + DOM → scroll / doplnění kontaktu / souhlasy / klik na tlačítko). Vypneš: `GEMINI_SELF_HEAL=0`.
+- Po selhání odeslání bot jednou zkusí **Gemini self-heal** (screenshot + DOM → scroll / doplnění kontaktu / souhlasy / klik na tlačítko). Vypneš: `GEMINI_SELF_HEAL=0`.
 - Bez `GEMINI_API_KEY` se oba kroky přeskočí bez chyby — bot funguje dál.
 
-Defaultní model: **`gemini-2.5-flash`**. Stará jména (`gemini-1.5-flash`) se mapují na aktuální modely automaticky v `jobhunter_bot/config.py`.
+Defaultní model: **`gemini-2.5-pro`** (lepší kvalita; pro úsporu použij `gemini-2.5-flash`). Stará jména (`gemini-1.5-flash`) se mapují v `jobhunter_bot/config.py`.
 
 ---
 
@@ -329,6 +331,7 @@ Když cokoli selže, bot **místo tichého returnu ukládá diagnostiku**:
   - `page.html` — celý DOM formuláře v okamžiku selhání
   - `screenshot.png` — full-page screenshot prohlížeče
   - `error.txt` — důvod selhání + URL + stacktrace
+- **`tools/last_failure_for_cursor.json`** (gitignored) — po každém FAILu přepíše odkazy na poslední diagnostickou složku; v Cursoru otevři `@tools/last_failure_for_cursor.json` a přilož screenshot z `debug_apply_failures/…/`.
 - **`debug_jobs_history/<timestamp>_<tag>.{html,png}`**
   - snapshot stránky „Historie odpovědí", když fetch vrátí 0 URL
 
@@ -371,7 +374,7 @@ Otevři `debug_apply_failures/<složka>/page.html`, najdi `<input>` pro jméno a
 Starší bug — fix už je v `_check_application_consents` (label fallback čte `input.checked` před klikem).
 
 **„Gemini 404 / model not found"**
-Stará jména modelů se mapují automaticky na aktuální (`gemini-2.5-flash`). Když jsi přepsal `.env` ručně, dej tam `GEMINI_MODEL=gemini-2.5-flash`.
+Stará jména modelů se mapují automaticky na aktuální (`gemini-2.5-pro` / `gemini-2.5-flash`). Pro úsporu quota použij `GEMINI_MODEL=gemini-2.5-flash`.
 
 **„FAIL odeslání: není vidět tlačítko Odpovědět"**
 Typicky překrytá cookie lišta nebo jiný jazyk. V `debug_apply_failures/` uvidíš screenshot — bud přidej pattern do `_submit_in_frame`, nebo na tu stránku si otevři browser ručně a zavři cookies.

@@ -6,7 +6,8 @@ from dataclasses import dataclass
 from dotenv import load_dotenv
 
 # Google AI Studio: staré ID (např. gemini-1.5-flash) vrací 404 — mapujeme na aktuální stabilní modely.
-_GEMINI_DEFAULT_MODEL = "gemini-2.5-flash"
+# Výchozí „pro“ kvalita (AI Studio / student často má Pro); přepiš GEMINI_MODEL=gemini-2.5-flash pro úsporu.
+_GEMINI_DEFAULT_MODEL = "gemini-2.5-pro"
 _GEMINI_MODEL_REPLACEMENTS: dict[str, str] = {
     "gemini-1.5-flash": _GEMINI_DEFAULT_MODEL,
     "gemini-1.5-flash-001": _GEMINI_DEFAULT_MODEL,

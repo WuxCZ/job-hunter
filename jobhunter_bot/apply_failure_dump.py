@@ -13,6 +13,9 @@ from jobhunter_bot.db import JobListing
 DUMP_ROOT = Path("debug_apply_failures")
 MAX_HTML_CHARS = 1_800_000
 
+# Poslední FAIL — přehled pro Cursor / @ soubory (neobsahuje tajné klíče).
+CURSOR_LAST_FAILURE = Path("tools") / "last_failure_for_cursor.json"
+
 
 def _folder_name(listing: JobListing) -> str:
     ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
@@ -70,6 +73,36 @@ def record_apply_failure(page, listing: JobListing, reason: str) -> str | None:
         except Exception:
             (folder / "page.html").write_text("(HTML se nepodařilo uložit)", encoding="utf-8")
 
+        publish_cursor_failure_bundle(str(folder), listing, reason)
         return str(folder)
     except Exception:
         return None
+
+
+def publish_cursor_failure_bundle(folder_rel: str, listing: JobListing, reason: str) -> None:
+    """Uloží krátký JSON s cestami k diagnostice — v Cursoru otevři @tools/last_failure_for_cursor.json."""
+    try:
+        rel = folder_rel.replace("\\", "/")
+        bundle = {
+            "listing_title": listing.title,
+            "listing_url": listing.url,
+            "listing_company": listing.company,
+            "reason": reason,
+            "debug_folder": rel,
+            "open_in_editor": [
+                f"{rel}/meta.json",
+                f"{rel}/screenshot.png",
+                f"{rel}/page.html",
+            ],
+            "hint_cs": (
+                "V Cursoru: @tools/last_failure_for_cursor.json + @screenshot + @meta.json. "
+                "Bot při dalším běhu zkusí Gemini self-heal, pokud máš GEMINI_API_KEY."
+            ),
+        }
+        CURSOR_LAST_FAILURE.parent.mkdir(parents=True, exist_ok=True)
+        CURSOR_LAST_FAILURE.write_text(
+            json.dumps(bundle, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
