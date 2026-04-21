@@ -4,6 +4,8 @@ Automatizovaný bot na odpovídání na pracovní inzeráty z **Jobs.cz** a vše
 
 Bot umí sám otevřít inzerát, vyplnit kontaktní údaje, mzdové očekávání, krátký motivační dopis, nahrát CV, zaškrtnout souhlasy a odeslat přihlášku — **nebo** se před odesláním zastavit a nechat tě to schválit v GUI.
 
+> Public-ready release: moderní GUI, safe-mode ochrany, noční watchdog režim (`AUTO.bat`), live log (`WATCH.bat`) a detailní diagnostika selhání.
+
 ---
 
 ## Obsah
@@ -36,10 +38,11 @@ Bot umí sám otevřít inzerát, vyplnit kontaktní údaje, mzdové očekáván
   - nahrání PDF CV
   - zaškrtnutí souhlasů (GDPR, marketing, provozovatel) — i pro custom-styled checkboxy, které nemají nativní `<input>` viditelný v DOMu
 - **Manuální schvalování** — formulář se vyplní v prohlížeči a bot počká na tvoje **Schválit / Přeskočit / Stop vše**
-- **Auto režim** — žádné schvalování, bot jede od A do Z
+- **Auto režim v GUI** — žádné schvalování, bot jede od A do Z (není to totéž co `AUTO.bat`)
 - **Dry run** — všechno proběhne, ale odeslání se přeskočí
 - **Duplicitní ochrana** — lokální SQLite DB + synchronizace s **Historií odpovědí na Jobs.cz** (pokud je platná session)
 - **Kontrola inboxu** přes IMAP (spáruje přijaté odpovědi s odeslanými přihláškami)
+- **Fallback "dokončím ručně"** — při FAILu můžeš nechat Chrome otevřený, formulář doplnit ručně a bot mezitím pokračuje na další nabídku
 - **Gemini** jen na:
   - souhrn inzerátu do levého panelu GUI
   - AI validaci vyplněného formuláře (screenshot + DOM → „vše vyplněné?")
@@ -148,6 +151,8 @@ Start.bat
 
 - **Profil** — přepínání mezi profily (každý má svoje CV, session, kontakt, mzdu)
 - **Režim**: `manual` (schvaluješ) / `auto` (bez ptaní)
+- **Důležité**: `auto` v GUI = stejný běh jako manual, jen bez tlačítek Schválit/Přeskočit.  
+  Noční watchdog smyčka je samostatně přes `AUTO.bat` v rootu.
 - **Limit** — max. počet inzerátů na jeden běh
 - **Dry run** — žádné reálné odeslání, jen simulace (CV + kontakt + zpráva se vyplní, pak skip)
 - **Dry: ignorovat duplicity v DB** — pro opakovaný test stejných inzerátů
@@ -159,6 +164,7 @@ Start.bat
   - `pauza mezi pokusy` (default 15 s) — rate-limit mezi přihláškami
   - `stop po FAILech v řadě` (default 5) — po tolika chybách po sobě se běh zastaví (čekej, než vyprší server error / změníš nastavení)
   - při chybě serveru jobs.cz („We run into some problem") bot automaticky zkusí odeslání **ještě jednou po 60s**
+  - volba **„Při FAIL ponechat Chrome otevřený (CDP)"**: když odeslání selže, okno zůstane otevřené pro ruční dokončení, zatímco bot pokračuje dál
 
 V manuálním režimu se u každého inzerátu objeví box **„Čeká na schválení"**:
 
@@ -203,6 +209,7 @@ python main.py run --limit 50 --dry-run --ignore-db --no-gemini-form-check --hea
 - `--no-gemini-form-check` — nevolej AI validaci formuláře (ušetříš API quota při stovkách pokusů)
 - `--headless` — Chromium bez okna (rychlejší)
 - `--browser-slow-mo 600` — zpomalení v ms mezi akcemi Playwrightu (pro debug)
+- `JOBHUNTER_LEAVE_BROWSER_ON_FAIL=1` — při FAILu ponechá systémový Chrome/Edge otevřený pro ruční dokončení formuláře (CLI režim)
 
 ---
 
