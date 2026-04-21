@@ -372,6 +372,7 @@ Odpověz POUZE platným JSON objektem (žádný markdown), přesně tento tvar k
 # Baseline je schválně LOW (20), aby "IT" samotné nestačilo. Skóre ≥50 vyžaduje
 # alespoň jedno silné plus. Silné minus (manager/konzultant/obchodník/stavař) má
 # masivní dopad, aby nic takového neproleze.
+# Noční směny: uživatel nechce noční provoz — explicitní signály v názvu silně sníží skóre.
 
 _STRONG_POSITIVE = [
     # Helpdesk / Servicedesk / L1 L2
@@ -439,6 +440,19 @@ _STRONG_NEGATIVE = [
     r"\bsap\b", r"\berp\b",
 ]
 
+# Noční směny — zvlášť: po výpočtu skóre se aplikuje tvrdý strop (viz evaluate_fit),
+# aby „helpdesk + night shift“ kvůli dvojímu počítání plusů stále neprošel min fit 50.
+_NIGHT_SHIFT_TITLE = [
+    r"nočn[íi]\s*směn",
+    r"směn[ay]?\s*nočn",
+    r"nočn[íi]\s*provoz",
+    r"nočn[íi]\s*údržb",
+    r"nočn[íi]\s*práce",
+    r"night\s*shift",
+    r"overnight\s*shift",
+    r"graveyard\s*shift",
+]
+
 _MEDIUM_NEGATIVE = [
     r"\bsenior\b",
     r"\banalytik\b",
@@ -458,6 +472,7 @@ def _matches_any(title: str, patterns: list[str]) -> list[str]:
 def evaluate_fit(listing: JobListing) -> tuple[int, str, str]:
     """
     Profil: HW technik / helpdesk / service desk L1 L2 / Windows Server.
+    Bez nočních směn (noční směna / night shift v názvu silně snižuje skóre).
     Baseline 20, silný plus +25, střední +10, silný minus -40, střední -15.
     """
     title = (listing.title or "").lower()
@@ -466,6 +481,7 @@ def evaluate_fit(listing: JobListing) -> tuple[int, str, str]:
     medium_pos = _matches_any(title, _MEDIUM_POSITIVE)
     strong_neg = _matches_any(title, _STRONG_NEGATIVE)
     medium_neg = _matches_any(title, _MEDIUM_NEGATIVE)
+    night_hits = _matches_any(title, _NIGHT_SHIFT_TITLE)
 
     score = 20
     score += min(70, len(strong_pos) * 30)
@@ -474,6 +490,10 @@ def evaluate_fit(listing: JobListing) -> tuple[int, str, str]:
     score -= min(30, len(medium_neg) * 15)
     score = max(0, min(100, score))
 
+    if night_hits:
+        # Pod defaultní min fit (50) — uživatel nechce noční provoz
+        score = min(score, 40)
+
     if score >= 65:
         reason = "Silná shoda (helpdesk / HW / Windows Server)."
     elif score >= 50:
@@ -481,10 +501,11 @@ def evaluate_fit(listing: JobListing) -> tuple[int, str, str]:
     elif score >= 30:
         reason = "Slabší shoda, nejistá."
     else:
-        reason = "Nízká shoda (manager / obchod / architekt / mimo profil)."
+        reason = "Nízká shoda (manager / obchod / architekt / noční směna / mimo profil)."
 
     plus_text = ", ".join(dict.fromkeys(strong_pos + medium_pos)) or "žádná silná klíčová slova"
-    minus_text = ", ".join(dict.fromkeys(strong_neg + medium_neg)) or "žádné výrazné negativní signály"
+    minus_parts = list(dict.fromkeys(strong_neg + medium_neg + night_hits))
+    minus_text = ", ".join(minus_parts) or "žádné výrazné negativní signály"
     details = (
         f"+ Pozitivní signály: {plus_text}\n"
         f"- Negativní signály: {minus_text}\n"
