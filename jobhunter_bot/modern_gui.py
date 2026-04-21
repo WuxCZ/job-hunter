@@ -58,6 +58,7 @@ class JobHunterModernGUI:
         self.applicant_email_var = ctk.StringVar(value="")
         self.applicant_phone_var = ctk.StringVar(value="")
         self.applicant_salary_var = ctk.StringVar(value="50000")
+        self.applicant_availability_var = ctk.StringVar(value="Můžu nastoupit okamžitě.")
         # --- Safe mode: rozumné brzdy, aby bot nedělal spam a nespadl do banu ---
         self.safe_mode_var = ctk.BooleanVar(value=True)
         self.min_fit_var = ctk.IntVar(value=50)
@@ -541,15 +542,37 @@ class JobHunterModernGUI:
             anchor="w",
         ).grid(row=7, column=1, sticky="w", padx=8, pady=(0, 8))
 
-        ctk.CTkLabel(contact_card, text="Mzdové očekávání (Kč)").grid(
+        ctk.CTkLabel(contact_card, text="Nástup / dostupnost").grid(
             row=8, column=0, sticky="nw", padx=12, pady=(4, 4)
+        )
+        ctk.CTkEntry(
+            contact_card,
+            textvariable=self.applicant_availability_var,
+            width=420,
+            placeholder_text="např. Můžu nastoupit okamžitě.",
+        ).grid(row=8, column=1, sticky="ew", padx=8, pady=(4, 0))
+        ctk.CTkLabel(
+            contact_card,
+            text=(
+                "Krátká věta nebo výběr u selectu (ihned / výpovědní lhůta). Prázdné = bot použije výchozí text. "
+                "JOBHUNTER_SKIP_AVAILABILITY_FILL=1 v .env vyplňování vypne."
+            ),
+            font=ctk.CTkFont(size=12),
+            text_color=("gray40", "gray60"),
+            anchor="w",
+            justify="left",
+            wraplength=420,
+        ).grid(row=9, column=1, sticky="w", padx=8, pady=(0, 8))
+
+        ctk.CTkLabel(contact_card, text="Mzdové očekávání (Kč)").grid(
+            row=10, column=0, sticky="nw", padx=12, pady=(4, 4)
         )
         ctk.CTkEntry(
             contact_card,
             textvariable=self.applicant_salary_var,
             width=420,
             placeholder_text="např. 50000",
-        ).grid(row=8, column=1, sticky="ew", padx=8, pady=(4, 0))
+        ).grid(row=10, column=1, sticky="ew", padx=8, pady=(4, 0))
         ctk.CTkLabel(
             contact_card,
             text=(
@@ -561,14 +584,14 @@ class JobHunterModernGUI:
             anchor="w",
             justify="left",
             wraplength=420,
-        ).grid(row=9, column=1, sticky="w", padx=8, pady=(0, 8))
+        ).grid(row=11, column=1, sticky="w", padx=8, pady=(0, 8))
 
         ctk.CTkButton(
             contact_card,
             text="Uložit kontakt a celý profil",
             command=lambda: self._save_profile_from_form(confirm_dialog=True),
             width=280,
-        ).grid(row=10, column=0, columnspan=2, sticky="w", padx=12, pady=(4, 14))
+        ).grid(row=12, column=0, columnspan=2, sticky="w", padx=12, pady=(4, 14))
 
     def _log(self, text: str) -> None:
         self.log.insert("end", f"{text}\n")
@@ -632,6 +655,9 @@ class JobHunterModernGUI:
         self.applicant_email_var.set(getattr(p, "applicant_email", "") or "")
         self.applicant_phone_var.set(getattr(p, "applicant_phone", "") or "")
         self.applicant_salary_var.set(str(getattr(p, "applicant_salary", "") or ""))
+        self.applicant_availability_var.set(
+            str(getattr(p, "applicant_availability", "") or "") or "Můžu nastoupit okamžitě."
+        )
 
     def _validate_cv_path(self, cv_path: str, show_message: bool) -> bool:
         if not cv_path:
@@ -667,6 +693,7 @@ class JobHunterModernGUI:
         p.applicant_email = self.applicant_email_var.get().strip()
         p.applicant_phone = self.applicant_phone_var.get().strip()
         p.applicant_salary = self.applicant_salary_var.get().strip()
+        p.applicant_availability = self.applicant_availability_var.get().strip()
         self.profile_store.save(self.profiles, profile_name)
         self.profile_combo.configure(values=[profile.name for profile in self.profiles])
         self._log(f"Profil uložen: {p.name}")
@@ -700,6 +727,7 @@ class JobHunterModernGUI:
                 applicant_email="",
                 applicant_phone="",
                 applicant_salary="50000",
+                applicant_availability="Můžu nastoupit okamžitě.",
             )
         )
         self.profile_combo.configure(values=[p.name for p in self.profiles])
@@ -998,6 +1026,10 @@ class JobHunterModernGUI:
                 salary_for_apply = (getattr(profile, "applicant_salary", "") or "").strip() or os.getenv(
                     "APPLICANT_SALARY", ""
                 ).strip()
+                availability_for_apply = (
+                    (getattr(profile, "applicant_availability", "") or "").strip()
+                    or os.getenv("APPLICANT_AVAILABILITY", "").strip()
+                )
                 message = build_message(
                     self.cfg.gemini_api_key,
                     self.cfg.gemini_model,
@@ -1042,6 +1074,7 @@ class JobHunterModernGUI:
                         applicant_email=email_for_apply,
                         applicant_phone=phone_for_apply,
                         applicant_salary=salary_for_apply,
+                        applicant_availability=availability_for_apply,
                         gemini_api_key=self.cfg.gemini_api_key,
                         gemini_model=self.cfg.gemini_model,
                         info_log=apply_info,
@@ -1113,6 +1146,7 @@ class JobHunterModernGUI:
                                 applicant_email=email_for_apply,
                                 applicant_phone=phone_for_apply,
                                 applicant_salary=salary_for_apply,
+                                applicant_availability=availability_for_apply,
                                 gemini_api_key=self.cfg.gemini_api_key,
                                 gemini_model=self.cfg.gemini_model,
                                 info_log=retry_info,
@@ -1158,6 +1192,7 @@ class JobHunterModernGUI:
                                 applicant_email=email_for_apply,
                                 applicant_phone=phone_for_apply,
                                 applicant_salary=salary_for_apply,
+                                applicant_availability=availability_for_apply,
                                 gemini_api_key=self.cfg.gemini_api_key,
                                 gemini_model=self.cfg.gemini_model,
                                 info_log=recover_info,

@@ -21,6 +21,8 @@ class UserProfile:
     applicant_phone: str = ""
     # Plat — pokud formulář požaduje mzdové očekávání (prázdné = nevyplňovat)
     applicant_salary: str = "50000"
+    # Nástup / dostupnost — text do pole nebo výběr „ihned“ u selectu (prázdné = výchozí v botovi)
+    applicant_availability: str = ""
 
 
 class ProfileStore:
@@ -51,6 +53,7 @@ class ProfileStore:
                 applicant_email=item.get("applicant_email", ""),
                 applicant_phone=item.get("applicant_phone", ""),
                 applicant_salary=str(item.get("applicant_salary", "50000") or ""),
+                applicant_availability=str(item.get("applicant_availability", "") or ""),
             )
 
         profiles = [_profile_item(dict(p)) for p in raw.get("profiles", [])]

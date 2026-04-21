@@ -158,6 +158,7 @@ def cmd_run(
             ).strip().lower() in ("1", "true", "yes", "on")
             email_apply = os.getenv("APPLICANT_EMAIL", "").strip() or (cfg.imap_user or "").strip()
             name_apply = os.getenv("APPLICANT_FULL_NAME", "").strip()
+            avail_apply = os.getenv("APPLICANT_AVAILABILITY", "").strip()
             message = build_message(
                 cfg.gemini_api_key,
                 cfg.gemini_model,
@@ -177,6 +178,7 @@ def cmd_run(
                     applicant_email=email_apply,
                     applicant_phone=os.getenv("APPLICANT_PHONE", "").strip(),
                     applicant_salary=os.getenv("APPLICANT_SALARY", "").strip(),
+                    applicant_availability=avail_apply,
                     gemini_api_key=cfg.gemini_api_key,
                     gemini_model=cfg.gemini_model,
                     info_log=apply_info,
@@ -220,6 +222,7 @@ def cmd_run(
                         applicant_email=email_apply,
                         applicant_phone=os.getenv("APPLICANT_PHONE", "").strip(),
                         applicant_salary=os.getenv("APPLICANT_SALARY", "").strip(),
+                        applicant_availability=avail_apply,
                         gemini_api_key=cfg.gemini_api_key,
                         gemini_model=cfg.gemini_model,
                         info_log=retry_info,
@@ -250,6 +253,7 @@ def cmd_run(
                         applicant_email=email_apply,
                         applicant_phone=os.getenv("APPLICANT_PHONE", "").strip(),
                         applicant_salary=os.getenv("APPLICANT_SALARY", "").strip(),
+                        applicant_availability=avail_apply,
                         gemini_api_key=cfg.gemini_api_key,
                         gemini_model=cfg.gemini_model,
                         info_log=recover_info,

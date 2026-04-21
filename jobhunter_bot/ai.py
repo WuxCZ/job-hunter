@@ -353,6 +353,7 @@ Pravidla:
 - U záznamu s typem "select" a tagem SELECT: prohlédni optionsPreview (seznam voleb). Když je requiredHint=true a empty=true (nebo je pořád „Vyberte…“ / první placeholdrová volba), je problém.
 - Když select není prázdný, ale volba nesedí k inzerátu (např. špatný typ úvazku), uveď to v issues a zvaž ready=false.
 - Vlastní dropdown (div/role=listbox) v JSON nemusí být — pokud ho vidíš na screenshotu a vypadá povinně, napiš to do issues.
+- Pole „nástup“, „dostupnost“, „výpovědní lhůta“, „kdy můžete nastoupit“: prázdné nebo jen placeholdrový select = problém (ready=false), pokud to formulář vyžaduje.
 - Prázdná velká textarea často znamená nevyplněnou zprávu.
 - Soubor CV: pokud je file input a value v DOM často neukáže název, spolehni se na screenshot + kontext.
 - Když si nejsi jistý/á, nastav ready=true a krátce to uveď v issues.
@@ -479,7 +480,7 @@ select_picks: pole max 6 objektů. Každý: {{"name_or_id_contains": "část nam
 Použij jen hodnoty, které skutečně jsou v optionsPreview u daného selectu. Když si nejsi jistý/á, nech prázdné pole [].
 
 Pravidla:
-- refill_contact=true jen když JSON ukazuje prázdná povinná textová pole (jméno/e-mail/telefon).
+- refill_contact=true když JSON ukazuje prázdná povinná textová pole (jméno/e-mail/telefon) NEBO chybí nástup/dostupnost u povinného pole — bot znovu doplní kontakt, mzdu i frázi nástupu z profilu.
 - recheck_consents=true když chybí GDPR / souhlas checkboxy.
 - select_picks: když nějaký SELECT má requiredHint a empty=true, nebo je zjevně potřeba rozumná volba (úvazek, zkušenosti, lokalita…) a chybí — zkus navrhnout jednu vhodnou volbu podle inzerátu a optionsPreview.
 - click_button_substrings: max 4 krátké řetězce viditelného textu tlačítek (česky nebo anglicky), žádné CSS selektory.

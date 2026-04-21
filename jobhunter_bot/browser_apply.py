@@ -360,6 +360,23 @@ def _dismiss_cookie_banners(page) -> None:
         pass
 
 
+def _page_already_shows_apply_form(page) -> bool:
+    """
+    Alma Career / Jobs microsite: URL s r=reply někdy otevře přihlášku přímo
+    (textarea + file input už v DOM bez kliknutí na „Odpovědět“).
+    """
+    try:
+        for fr in page.frames:
+            try:
+                if fr.locator("textarea").count() > 0 and fr.locator("input[type='file']").count() > 0:
+                    return True
+            except PlaywrightError:
+                continue
+    except PlaywrightError:
+        pass
+    return False
+
+
 def _click_apply_locator_scroll(loc, timeout_ms: int = 15000) -> bool:
     try:
         n = loc.count()
@@ -384,6 +401,9 @@ def _try_click_apply_entry(page) -> bool:
     """
     Firemní microsites (např. wistron.jobs.cz) mají „Odpovědět“ v <span> uvnitř .cp-button —
     čistý get_by_role(name=Odpovědět) často nic nenajde.
+
+    Deep link s ``r=reply`` (Alma Career microsites, např. smsinfocomm.jobs.cz) může
+    zobrazit formulář hned — pak neklikáme.
     """
     _dismiss_cookie_banners(page)
     try:
@@ -399,7 +419,15 @@ def _try_click_apply_entry(page) -> bool:
     except PlaywrightError:
         pass
 
+    if _page_already_shows_apply_form(page):
+        return True
+
     locators = [
+        page.locator("a[href*='r=reply' i]"),
+        page.locator("a:has-text('Poslat CV')"),
+        page.locator("button:has-text('Poslat CV')"),
+        page.get_by_role("link", name=re.compile(r"Poslat\s+CV|Odeslat\s+životopis|Podat\s+přihlášku", re.I)),
+        page.get_by_role("button", name=re.compile(r"Poslat\s+CV|Podat\s+přihlášku", re.I)),
         page.locator("button:has-text('Odpovědět')"),
         page.locator("a:has-text('Odpovědět')"),
         page.locator("button.cp-button--submit"),
@@ -771,6 +799,155 @@ def _fill_applicant_contact_fields(page, full_name: str, email: str, phone: str)
     first, last = _split_full_name(full_name)
     for fr in page.frames:
         _fill_contact_in_frame(fr, first, last, email, phone)
+
+
+# Text do polí „kdy nastoupím“ — výchozí chování = okamžitě (bez nutnosti Gemini u šablony dopisu).
+_DEFAULT_APPLICANT_AVAILABILITY = "Můžu nastoupit okamžitě."
+
+
+def _effective_availability_text(raw: str) -> str:
+    if os.environ.get("JOBHUNTER_SKIP_AVAILABILITY_FILL", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    ):
+        return ""
+    t = (raw or "").strip()
+    return t or _DEFAULT_APPLICANT_AVAILABILITY
+
+
+def _fill_availability_in_frame(frame, text: str) -> bool:
+    """
+    Nástup / dostupnost / výpovědní lhůta — input, textarea i <select> s volbami typu „ihned“.
+    """
+    if not text:
+        return False
+    value = str(text).strip()
+    if not value:
+        return False
+    vlow = value.lower()
+
+    patterns = (
+        r"Možnost\s*nástupu",
+        r"Dostupnost",
+        r"Term[íi]n\s*nástupu",
+        r"Datum\s*nástupu",
+        r"Kdy\s*m[uů][žz]ete\s*nastoupit",
+        r"Nejbližší\s*možný\s*nástup",
+        r"^Nástup\s*[:*]?\s*$",
+        r"Zač[áa]tek\s*spolupr[áa]ce",
+        r"^Začátek\s*[:*]?\s*$",
+        r"V[ýy]povědn[íi]\s*l[ěe]hta",
+        r"Notice\s*period",
+        r"Earliest\s*start",
+        r"Earliest\s*possible\s*start",
+        r"Start\s*date",
+        r"Available\s*from",
+        r"^Availability\b",
+        r"^When\s*can\s*you\s*start",
+    )
+    selectors = (
+        "input[name*='availability' i]",
+        "input[name*='startdate' i]",
+        "input[name*='start_date' i]",
+        "input[name*='nastup' i]",
+        "input[id*='availability' i]",
+        "input[id*='startDate' i]",
+        "input[id*='nastup' i]",
+        "input[placeholder*='nástup' i]",
+        "input[placeholder*='dostupnost' i]",
+        "textarea[name*='availability' i]",
+        "textarea[name*='start' i]",
+        "textarea[placeholder*='nástup' i]",
+        "textarea[placeholder*='dostupnost' i]",
+    )
+
+    filled = (
+        _try_by_label(frame, value, patterns)
+        or _try_by_role_textbox(frame, value, patterns)
+        or _try_by_selector(frame, value, selectors)
+    )
+
+    if not filled:
+        immediate_tokens = (
+            "ihned",
+            "okamžit",
+            "okamzit",
+            "hned",
+            "asap",
+            "bez výpověd",
+            "bez vypoved",
+            "without notice",
+            "immediate",
+        )
+        for pat in patterns:
+            try:
+                loc = frame.get_by_label(re.compile(pat, re.I))
+                if loc.count() == 0:
+                    continue
+                el = loc.first
+                tag = (el.evaluate("n => n.tagName") or "").lower()
+                if tag != "select":
+                    continue
+                options = el.evaluate(
+                    "s => Array.from(s.options).map((o, i) => ({ i, value: o.value, text: (o.textContent || '').trim() }))"
+                )
+                if not options:
+                    continue
+                best_i: int | None = None
+                best_score = -1
+                for opt in options:
+                    if not isinstance(opt, dict):
+                        continue
+                    ot = ((opt.get("text") or "") + " " + (opt.get("value") or "")).lower()
+                    score = 0
+                    for w in re.findall(r"[a-zá-ž]{3,}", vlow):
+                        if w in ot:
+                            score += 6
+                    if any(t in ot for t in immediate_tokens) and any(
+                        t in vlow for t in ("ihned", "hned", "okamž", "okamz", "bez", "asap", "immediate")
+                    ):
+                        score += 25
+                    if score > best_score:
+                        best_score = score
+                        try:
+                            best_i = int(opt["i"])
+                        except (TypeError, ValueError, KeyError):
+                            best_i = None
+                if best_i is not None and best_score >= 6:
+                    el.select_option(index=best_i, timeout=8000)
+                    filled = True
+                    break
+                if best_i is None:
+                    for opt in options:
+                        if not isinstance(opt, dict):
+                            continue
+                        ot = ((opt.get("text") or "") + (opt.get("value") or "")).lower()
+                        if any(t in ot for t in immediate_tokens):
+                            try:
+                                el.select_option(index=int(opt["i"]), timeout=8000)
+                            except (PlaywrightError, TypeError, ValueError, KeyError):
+                                continue
+                            filled = True
+                            break
+                if filled:
+                    break
+            except PlaywrightError:
+                continue
+
+    return filled
+
+
+def _fill_applicant_availability(page, availability: str) -> None:
+    if not availability:
+        return
+    for fr in page.frames:
+        try:
+            if _fill_availability_in_frame(fr, availability):
+                return
+        except PlaywrightError:
+            continue
 
 
 def _fill_salary_in_frame(frame, salary: str) -> bool:
@@ -1544,6 +1721,7 @@ def _execute_self_heal_plan(
     applicant_email: str,
     applicant_phone: str,
     applicant_salary: str,
+    applicant_availability: str = "",
 ) -> None:
     if not isinstance(plan, dict):
         return
@@ -1569,6 +1747,9 @@ def _execute_self_heal_plan(
         _fill_applicant_contact_fields(page, applicant_full_name, applicant_email, applicant_phone)
         if applicant_salary:
             _fill_applicant_salary(page, applicant_salary)
+        av = _effective_availability_text(applicant_availability)
+        if av:
+            _fill_applicant_availability(page, av)
     if plan.get("recheck_consents"):
         _check_application_consents(page)
     _apply_self_heal_select_picks(page, plan.get("select_picks"))
@@ -1627,6 +1808,7 @@ def _try_gemini_self_heal_after_failure(
     applicant_email: str,
     applicant_phone: str,
     applicant_salary: str,
+    applicant_availability: str,
     info_log: list[str] | None,
 ) -> bool:
     if os.environ.get("GEMINI_SELF_HEAL", "1").strip().lower() in (
@@ -1680,6 +1862,7 @@ def _try_gemini_self_heal_after_failure(
         applicant_email=applicant_email,
         applicant_phone=applicant_phone,
         applicant_salary=applicant_salary,
+        applicant_availability=applicant_availability,
     )
     return True
 
@@ -1696,6 +1879,7 @@ def apply_to_job(
     applicant_email: str = "",
     applicant_phone: str = "",
     applicant_salary: str = "",
+    applicant_availability: str = "",
     gemini_api_key: str = "",
     gemini_model: str = "",
     info_log: list[str] | None = None,
@@ -1710,6 +1894,9 @@ def apply_to_job(
     leave_browser_open_on_failure: při neúspěchu zkusí systémový Chrome/Edge s CDP,
     po skončení Playwright odpojí bez zavření oken — formulář můžeš doplnit ručně.
     Ignuje se v headless a dry-run. Když CDP nelze nastartovat, použije se běžný Chromium.
+
+    applicant_availability: text do polí nástup/dostupnost; prázdný řetězec → výchozí věta v kódu,
+    pokud není JOBHUNTER_SKIP_AVAILABILITY_FILL.
     """
     cv_file = Path(cv_path)
     if not cv_file.exists():
@@ -1797,7 +1984,7 @@ def apply_to_job(
                 return _apply_fail(
                     page,
                     listing,
-                    "není vidět / nejde kliknout „Odpovědět“ (zkus zavřít cookies nebo zkontroluj přihlášení)",
+                    "není vstup do přihlášky (Odpovědět / Poslat CV / odkaz r=reply; zkontroluj cookies a přihlášení)",
                 )
 
             page = _resolve_page_after_apply_click(context, page)
@@ -1836,6 +2023,9 @@ def apply_to_job(
 
             # 3) Vyplnit zprávu / motivační text.
             _fill_message(page, message)
+            avail_early = _effective_availability_text(applicant_availability)
+            if avail_early:
+                _fill_applicant_availability(page, avail_early)
 
             # 4) Nahrát PDF.
             if not _set_cv_pdf_file(page, cv_file):
@@ -1858,9 +2048,12 @@ def apply_to_job(
             )
             _fill_message(page, message)
 
-            # 6) Volitelné: mzdové očekávání (pokud formulář má odpovídající pole).
+            # 6) Volitelné: mzda + nástup/dostupnost (pole často odkryje až upload CV).
             if applicant_salary:
                 _fill_applicant_salary(page, applicant_salary)
+            avail_text = _effective_availability_text(applicant_availability)
+            if avail_text:
+                _fill_applicant_availability(page, avail_text)
 
             _check_application_consents(page)
             _apply_trace(info_log, "Souhlasy zkontrolovány, před odesláním.")
@@ -1930,6 +2123,7 @@ def apply_to_job(
                     applicant_email=applicant_email,
                     applicant_phone=applicant_phone,
                     applicant_salary=applicant_salary,
+                    applicant_availability=applicant_availability,
                     info_log=info_log,
                 )
                 if not _submit_application_with_retries(page):
@@ -1979,6 +2173,7 @@ def apply_to_job(
                     applicant_email=applicant_email,
                     applicant_phone=applicant_phone,
                     applicant_salary=applicant_salary,
+                    applicant_availability=applicant_availability,
                     info_log=info_log,
                 )
                 if _submit_application_with_retries(page):
