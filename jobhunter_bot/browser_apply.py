@@ -152,13 +152,23 @@ def _find_chrome_exe() -> Path | None:
     if sys.platform == "win32":
         pf = os.environ.get("PROGRAMFILES", r"C:\Program Files")
         pf86 = os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)")
+        local = os.environ.get("LOCALAPPDATA", "")
         for rel in (
             Path(pf) / "Google" / "Chrome" / "Application" / "chrome.exe",
             Path(pf86) / "Google" / "Chrome" / "Application" / "chrome.exe",
             Path(pf) / "Microsoft" / "Edge" / "Application" / "msedge.exe",
+            Path(pf86) / "Microsoft" / "Edge" / "Application" / "msedge.exe",
+            Path(local) / "Google" / "Chrome" / "Application" / "chrome.exe",
+            Path(local) / "Microsoft" / "Edge" / "Application" / "msedge.exe",
         ):
             if rel.is_file():
                 return rel
+        for cmd in ("chrome.exe", "chrome", "msedge.exe", "msedge"):
+            p = shutil.which(cmd)
+            if p:
+                pp = Path(p)
+                if pp.is_file():
+                    return pp
         return None
     for p in (
         Path("/usr/bin/google-chrome-stable"),
@@ -1469,6 +1479,8 @@ def apply_to_job(
                         )
                 else:
                     use_cdp = True
+                    if info_log is not None:
+                        info_log.append(f"Režim „ponechat prohlížeč“: CDP běží přes {chrome_exe}.")
                     browser = pw.chromium.connect_over_cdp(f"http://127.0.0.1:{cd_port}")
             elif info_log is not None:
                 info_log.append(
