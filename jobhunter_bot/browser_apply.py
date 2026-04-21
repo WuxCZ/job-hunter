@@ -1454,6 +1454,81 @@ def _first_or_new_page(context) -> object:
     return context.new_page()
 
 
+def _apply_self_heal_select_picks(page, picks: object) -> None:
+    """Nastaví native <select> podle plánu z Gemini (name/id + část textu volby)."""
+    if not isinstance(picks, list):
+        return
+    for raw in picks[:8]:
+        if not isinstance(raw, dict):
+            continue
+        name_part = str(
+            raw.get("name_or_id_contains")
+            or raw.get("match_name_or_id_substring")
+            or ""
+        ).strip().lower()
+        opt_needle = str(
+            raw.get("option_text_contains")
+            or raw.get("option_value_contains")
+            or ""
+        ).strip().lower()
+        if not name_part or not opt_needle:
+            continue
+        done_this_pick = False
+        for fr in page.frames:
+            if done_this_pick:
+                break
+            try:
+                loc = fr.locator("select")
+                n = min(loc.count(), 35)
+            except PlaywrightError:
+                continue
+            for i in range(n):
+                try:
+                    sel = loc.nth(i)
+                    if not sel.is_visible(timeout=450):
+                        continue
+                    nm = (sel.get_attribute("name") or "").lower()
+                    ida = (sel.get_attribute("id") or "").lower()
+                except PlaywrightError:
+                    continue
+                if name_part not in nm and name_part not in ida:
+                    continue
+                try:
+                    options = sel.evaluate(
+                        """s => Array.from(s.options).map((o, i) => ({
+                          i, v: String(o.value || ""), t: (o.textContent || "").trim()
+                        }))"""
+                    )
+                except PlaywrightError:
+                    continue
+                if not isinstance(options, list):
+                    continue
+                chosen_idx: int | None = None
+                for row in options:
+                    if not isinstance(row, dict):
+                        continue
+                    tv = str(row.get("t") or "").lower()
+                    vv = str(row.get("v") or "").lower()
+                    if opt_needle in tv or opt_needle in vv:
+                        try:
+                            chosen_idx = int(row["i"])
+                        except (TypeError, ValueError, KeyError):
+                            chosen_idx = None
+                        break
+                if chosen_idx is None:
+                    continue
+                try:
+                    sel.select_option(index=chosen_idx, timeout=8000)
+                except PlaywrightError:
+                    continue
+                try:
+                    page.wait_for_timeout(350)
+                except PlaywrightError:
+                    pass
+                done_this_pick = True
+                break
+
+
 def _execute_self_heal_plan(
     page,
     plan: dict,
@@ -1489,9 +1564,10 @@ def _execute_self_heal_plan(
             _fill_applicant_salary(page, applicant_salary)
     if plan.get("recheck_consents"):
         _check_application_consents(page)
+    _apply_self_heal_select_picks(page, plan.get("select_picks"))
     subs = plan.get("click_button_substrings") or []
     if not isinstance(subs, list):
-        return
+        subs = []
     for raw in subs[:6]:
         if not isinstance(raw, str):
             continue
@@ -1576,12 +1652,15 @@ def _try_gemini_self_heal_after_failure(
     analysis = str(plan.get("analysis_cs") or "").strip()
     if analysis and info_log is not None:
         info_log.append(f"Gemini self-heal: {analysis[:420]}")
+    sp = plan.get("select_picks")
+    has_select_picks = isinstance(sp, list) and len(sp) > 0
     has_actions = (
         bool(plan.get("scroll_to_bottom"))
         or bool(plan.get("scroll_to_top"))
         or bool(plan.get("refill_contact"))
         or bool(plan.get("recheck_consents"))
         or bool(plan.get("click_button_substrings"))
+        or has_select_picks
     )
     if not has_actions:
         if info_log is not None:

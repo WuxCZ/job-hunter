@@ -183,17 +183,66 @@ def default_message(listing: JobListing, sender_name: str = "") -> str:
 _FORM_STATE_JS = r"""() => {
   const out = [];
   const seen = new Set();
-  for (const el of document.querySelectorAll("input, textarea, select")) {
-    const ty = (el.type || "").toLowerCase();
-    if (ty === "hidden" || ty === "submit" || ty === "button" || ty === "reset") continue;
+  const isVisible = (el) => {
     const r = el.getBoundingClientRect();
     const st = window.getComputedStyle(el);
-    const visible =
+    return (
       r.width > 0 && r.height > 0 &&
       st.visibility !== "hidden" &&
       st.display !== "none" &&
-      el.getAttribute("aria-hidden") !== "true";
-    if (!visible) continue;
+      el.getAttribute("aria-hidden") !== "true"
+    );
+  };
+  const placeholderish = (txt) => {
+    const t = String(txt || "").trim().toLowerCase();
+    if (!t || t.length < 2) return true;
+    if (/^[\s–—\-_.:]+$/.test(t)) return true;
+    return /\b(vyberte|zvolte|choose|select)\b|^\.\.\.|^…/.test(t);
+  };
+
+  for (const el of document.querySelectorAll("select")) {
+    if (!isVisible(el)) continue;
+    const name = (el.name || "").slice(0, 64);
+    const id = (el.id || "").slice(0, 64);
+    const key = ("sel:" + (name || id || String(out.length)));
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const opts = [];
+    const maxO = Math.min(el.options.length, 50);
+    for (let i = 0; i < maxO; i++) {
+      const o = el.options[i];
+      opts.push({
+        index: i,
+        value: String(o.value || "").slice(0, 120),
+        text: String((o.textContent || "").trim()).slice(0, 140),
+      });
+    }
+    const val = String(el.value || "").trim();
+    const t0 = el.options[0] ? String((el.options[0].textContent || "").trim()) : "";
+    const req = el.required || el.getAttribute("aria-required") === "true";
+    const emptyish =
+      !val ||
+      (el.selectedIndex === 0 && placeholderish(t0));
+    out.push({
+      tag: "SELECT",
+      type: "select",
+      name,
+      id,
+      placeholder: "",
+      requiredHint: !!req,
+      empty: emptyish,
+      valuePreview: val.slice(0, 72),
+      selectedIndex: el.selectedIndex,
+      optionCount: el.options.length,
+      optionsPreview: opts,
+      ariaInvalid: el.getAttribute("aria-invalid") === "true",
+    });
+  }
+
+  for (const el of document.querySelectorAll("input, textarea")) {
+    const ty = (el.type || "").toLowerCase();
+    if (ty === "hidden" || ty === "submit" || ty === "button" || ty === "reset") continue;
+    if (!isVisible(el)) continue;
     const val = (el.value || "").trim();
     const key = (el.name || el.id || String(out.length));
     if (seen.has(key)) continue;
@@ -220,7 +269,7 @@ _FORM_STATE_JS = r"""() => {
     if (t && t.length < 200) errs.push(t);
   }
   return {
-    fields: out.slice(0, 100),
+    fields: out.slice(0, 120),
     visibleErrorTexts: [...new Set(errs)].slice(0, 20),
   };
 }"""
@@ -300,7 +349,10 @@ Strukturovaná data:
 {json.dumps(payload, ensure_ascii=False, indent=2)}
 
 Pravidla:
-- requiredHint=true a empty=true u důležitých typů (text, email, tel, textarea, select) = silný signál problému.
+- requiredHint=true a empty=true u důležitých typů (text, email, tel, textarea) = silný signál problému.
+- U záznamu s typem "select" a tagem SELECT: prohlédni optionsPreview (seznam voleb). Když je requiredHint=true a empty=true (nebo je pořád „Vyberte…“ / první placeholdrová volba), je problém.
+- Když select není prázdný, ale volba nesedí k inzerátu (např. špatný typ úvazku), uveď to v issues a zvaž ready=false.
+- Vlastní dropdown (div/role=listbox) v JSON nemusí být — pokud ho vidíš na screenshotu a vypadá povinně, napiš to do issues.
 - Prázdná velká textarea často znamená nevyplněnou zprávu.
 - Soubor CV: pokud je file input a value v DOM často neukáže název, spolehni se na screenshot + kontext.
 - Když si nejsi jistý/á, nastav ready=true a krátce to uveď v issues.
@@ -407,7 +459,7 @@ Kontext:
 - Pozice (titulek): {listing_title}
 - Poslední problém bota (česky): {failure_reason_cs}
 
-Strukturovaná pole z DOM (viditelné inputy/textarea/select — prázdná vs vyplněná):
+Strukturovaná pole z DOM (viditelné inputy/textarea; u SELECT i optionsPreview s volbami):
 {json.dumps(payload, ensure_ascii=False, indent=2)}
 
 Úkol: Navrhni bezpečné kroky, které může automat zkusit znovu (žádné vymýšlení jména/e-mailu — to bot doplní sám ze svého profilu).
@@ -419,12 +471,17 @@ Odpověz POUZE platným JSON (žádný markdown), přesně tyto klíče:
   "scroll_to_top": true nebo false,
   "refill_contact": true nebo false,
   "recheck_consents": true nebo false,
-  "click_button_substrings": ["např. Odeslat", "Pokračovat"]
+  "click_button_substrings": ["např. Odeslat", "Pokračovat"],
+  "select_picks": []
 }}
+
+select_picks: pole max 6 objektů. Každý: {{"name_or_id_contains": "část name nebo id native <select> (malá písmena stačí)", "option_text_contains": "unikátní část textu volby z optionsPreview"}}.
+Použij jen hodnoty, které skutečně jsou v optionsPreview u daného selectu. Když si nejsi jistý/á, nech prázdné pole [].
 
 Pravidla:
 - refill_contact=true jen když JSON ukazuje prázdná povinná textová pole (jméno/e-mail/telefon).
 - recheck_consents=true když chybí GDPR / souhlas checkboxy.
+- select_picks: když nějaký SELECT má requiredHint a empty=true, nebo je zjevně potřeba rozumná volba (úvazek, zkušenosti, lokalita…) a chybí — zkus navrhnout jednu vhodnou volbu podle inzerátu a optionsPreview.
 - click_button_substrings: max 4 krátké řetězce viditelného textu tlačítek (česky nebo anglicky), žádné CSS selektory.
 - scroll_to_bottom=true když finální tlačítko může být mimo viewport.
 """
