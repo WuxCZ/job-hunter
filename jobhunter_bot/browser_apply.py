@@ -368,17 +368,59 @@ def _page_already_shows_apply_form(page) -> bool:
     """
     Alma Career / Jobs microsite: URL s r=reply někdy otevře přihlášku přímo
     (textarea + file input už v DOM bez kliknutí na „Odpovědět“).
+    Některé microsite (Innomotics apod.) používají contenteditable místo textarea.
     """
+    text_sel = "textarea, [contenteditable='true'], div[role='textbox']"
     try:
         for fr in page.frames:
             try:
-                if fr.locator("textarea").count() > 0 and fr.locator("input[type='file']").count() > 0:
-                    return True
+                if fr.locator(text_sel).count() > 0 and fr.locator("input[type='file']").count() > 0:
+                    try:
+                        if fr.locator(text_sel).first.is_visible(timeout=600) and fr.locator(
+                            "input[type='file']"
+                        ).first.is_visible(timeout=600):
+                            return True
+                    except PlaywrightError:
+                        continue
             except PlaywrightError:
                 continue
     except PlaywrightError:
         pass
     return False
+
+
+def _visible_in_any_frame(page, selector: str, *, timeout_ms: int = 900) -> bool:
+    for fr in page.frames:
+        try:
+            loc = fr.locator(selector).first
+            if loc.count() > 0 and loc.is_visible(timeout=timeout_ms):
+                return True
+        except PlaywrightError:
+            continue
+    return False
+
+
+def _wait_for_alma_reply_form(page, start_url: str, info_log: list[str] | None) -> None:
+    """
+    Alma Career SPA často zobrazí jen „Načítání“ — počkáme na skutečný formulář
+    (odpovědní formulář / r=reply), např. innomotics.jobs.cz/detail-pozice/odpovedni-formular.
+    """
+    low = (start_url or "").lower()
+    if "odpovedni-formular" not in low and "r=reply" not in low:
+        return
+    _apply_trace(info_log, "Alma Career: čekám na vykreslení odpovědního formuláře (SPA)…")
+    text_sel = "textarea, [contenteditable='true'], div[role='textbox']"
+    for _ in range(90):
+        if _page_already_shows_apply_form(page):
+            return
+        if _visible_in_any_frame(page, text_sel) and _visible_in_any_frame(
+            page, "input[type='file']", timeout_ms=600
+        ):
+            return
+        try:
+            page.wait_for_timeout(500)
+        except PlaywrightError:
+            pass
 
 
 def _click_apply_locator_scroll(loc, timeout_ms: int = 15000) -> bool:
@@ -2136,6 +2178,7 @@ def apply_to_job(
         )
         page = _first_or_new_page(context)
         page.goto(listing.url, wait_until="load", timeout=90000)
+        _wait_for_alma_reply_form(page, start_url, info_log)
         _apply_trace(info_log, "Inzerát načten, hledám „Odpovědět“ / vstup do formuláře.")
 
         def _inner_apply() -> tuple[bool, str]:
