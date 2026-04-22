@@ -146,11 +146,110 @@ def _launch_chromium(p, *, slow_mo_ms: int = 0, headless: bool = False):
     return p.chromium.launch(**kw)
 
 
+def _cmd_progress_enabled() -> bool:
+    return os.environ.get("JOBHUNTER_CMD_PROGRESS", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+
+
+def _cmd_progress(msg: str, info_log: list[str] | None = None) -> None:
+    """Stejný řádek do CMD (flush) a do info_log — vidíš průběh v konzoli i v GUI."""
+    line = f"[JobHunter] {msg}"
+    if _cmd_progress_enabled():
+        print(line, flush=True)
+    if info_log is not None:
+        info_log.append(line)
+
+
 def _apply_trace(info_log: list[str] | None, message: str) -> None:
-    """Krátké milníky do info_log → CLI/GUI vypisují průběh jedné přihlášky jako u debug."""
-    if info_log is None:
+    """Alias pro milníky přihlášky (kompatibilní název)."""
+    _cmd_progress(message, info_log)
+
+
+def _cdp_close_extra_tabs(context, keep_page) -> None:
+    """Při CDP zavře ostatní karty — zůstane jen keep_page (méně zaseknutí na špatné tab)."""
+    try:
+        pages = list(context.pages)
+    except Exception:
         return
-    info_log.append(f"[Aplikace] {message}")
+    for p in pages:
+        if p is keep_page:
+            continue
+        try:
+            p.close()
+        except Exception:
+            pass
+
+
+def _goto_listing_with_retries(
+    page,
+    url: str,
+    *,
+    context,
+    use_cdp: bool,
+    info_log: list[str] | None,
+    max_attempts: int = 5,
+) -> None:
+    """Opakované načtení inzerátu; u CDP před každým pokusem jedna karta."""
+    last_exc: BaseException | None = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            if use_cdp:
+                _cdp_close_extra_tabs(context, page)
+                try:
+                    page.bring_to_front()
+                except Exception:
+                    pass
+            _cmd_progress(f"Stránka: načítám inzerát (pokus {attempt}/{max_attempts})…", info_log)
+            wait_until = "domcontentloaded" if attempt <= 2 else "load"
+            timeout_ms = min(90_000, 16_000 + attempt * 14_000)
+            page.goto(url, wait_until=wait_until, timeout=timeout_ms)
+            _cmd_progress("Stránka: dokument načten, pokračuji.", info_log)
+            return
+        except PlaywrightError as exc:
+            last_exc = exc
+            _cmd_progress(
+                f"Stránka: načtení selhalo nebo příliš dlouhé ({exc.__class__.__name__}), zkouším znovu…",
+                info_log,
+            )
+            try:
+                page.wait_for_timeout(400 + attempt * 300)
+            except PlaywrightError:
+                pass
+    if last_exc is not None:
+        raise last_exc
+    raise TimeoutError("goto: neznámá chyba")
+
+
+def _cdp_fast_networkidle() -> bool:
+    """U CDP často visí networkidle — zkrátit nebo přeskočit."""
+    return os.environ.get("JOBHUNTER_CDP_FAST_IDLE", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+
+
+def _optional_network_idle(
+    page,
+    *,
+    use_cdp: bool,
+    timeout_ms: int,
+    info_log: list[str] | None,
+    label: str,
+) -> None:
+    eff = min(timeout_ms, 6500) if (use_cdp and _cdp_fast_networkidle()) else timeout_ms
+    try:
+        page.wait_for_load_state("networkidle", timeout=eff)
+    except PlaywrightTimeoutError:
+        _cmd_progress(
+            f"{label}: networkidle ukončeno po {eff // 1000}s — pokračuji.",
+            info_log,
+        )
 
 
 def _pick_free_port() -> int:
@@ -408,15 +507,19 @@ def _wait_for_alma_reply_form(page, start_url: str, info_log: list[str] | None) 
     low = (start_url or "").lower()
     if "odpovedni-formular" not in low and "r=reply" not in low:
         return
-    _apply_trace(info_log, "Alma Career: čekám na vykreslení odpovědního formuláře (SPA)…")
+    _cmd_progress("Formulář: čekám na vykreslení (Alma SPA — často jen „Načítání“)…", info_log)
     text_sel = "textarea, [contenteditable='true'], div[role='textbox']"
-    for _ in range(90):
+    for i in range(90):
         if _page_already_shows_apply_form(page):
+            _cmd_progress("Formulář: hotovo — pole zprávy a CV jsou vidět.", info_log)
             return
         if _visible_in_any_frame(page, text_sel) and _visible_in_any_frame(
             page, "input[type='file']", timeout_ms=600
         ):
+            _cmd_progress("Formulář: hotovo — komponenty formuláře jsou viditelné.", info_log)
             return
+        if i > 0 and i % 10 == 0:
+            _cmd_progress(f"Formulář: stále se vykresluje… ({i * 0.5:.0f}s)", info_log)
         try:
             page.wait_for_timeout(500)
         except PlaywrightError:
@@ -443,7 +546,7 @@ def _click_apply_locator_scroll(loc, timeout_ms: int = 15000) -> bool:
     return False
 
 
-def _try_click_apply_entry(page) -> bool:
+def _try_click_apply_entry(page, *, use_cdp: bool = False, info_log: list[str] | None = None) -> bool:
     """
     Firemní microsites (např. wistron.jobs.cz) mají „Odpovědět“ v <span> uvnitř .cp-button —
     čistý get_by_role(name=Odpovědět) často nic nenajde.
@@ -452,22 +555,28 @@ def _try_click_apply_entry(page) -> bool:
     zobrazit formulář hned — pak neklikáme.
     """
     _dismiss_cookie_banners(page)
+    _cmd_progress("Stránka: čekám na základní načtení (load)…", info_log)
     try:
         page.wait_for_load_state("load", timeout=30000)
     except PlaywrightError:
         pass
-    try:
-        page.wait_for_load_state("networkidle", timeout=22000)
-    except PlaywrightTimeoutError:
-        pass
+    _optional_network_idle(
+        page,
+        use_cdp=use_cdp,
+        timeout_ms=22000,
+        info_log=info_log,
+        label="Stránka",
+    )
     try:
         page.wait_for_timeout(1600)
     except PlaywrightError:
         pass
 
     if _page_already_shows_apply_form(page):
+        _cmd_progress("Formulář: už je otevřený — přeskakuji hledání tlačítka „Odpovědět“.", info_log)
         return True
 
+    _cmd_progress("Formulář: hledám vstup (Odpovědět / Poslat CV / odkaz)…", info_log)
     locators = [
         page.locator("a[href*='r=reply' i]"),
         page.locator("a:has-text('Poslat CV')"),
@@ -2177,14 +2286,29 @@ def apply_to_job(
             storage_state_path=storage_state_path,
         )
         page = _first_or_new_page(context)
-        page.goto(listing.url, wait_until="load", timeout=90000)
-        _wait_for_alma_reply_form(page, start_url, info_log)
-        _apply_trace(info_log, "Inzerát načten, hledám „Odpovědět“ / vstup do formuláře.")
+        if use_cdp:
+            _cdp_close_extra_tabs(context, page)
+            _cmd_progress("Prohlížeč (CDP): nechávám jednu kartu — ostatní jsem zavřel.", info_log)
+        try:
+            _goto_listing_with_retries(
+                page,
+                start_url,
+                context=context,
+                use_cdp=use_cdp,
+                info_log=info_log,
+            )
+            _wait_for_alma_reply_form(page, start_url, info_log)
+        except PlaywrightError as exc:
+            msg = f"načtení stránky inzerátu selhalo po opakováních ({exc.__class__.__name__})"
+            _cmd_progress(msg, info_log)
+            return False, msg
+
+        _cmd_progress("Stránka: inzerát načten, řeším vstup do přihlášky.", info_log)
 
         def _inner_apply() -> tuple[bool, str]:
             nonlocal page
 
-            if not _try_click_apply_entry(page):
+            if not _try_click_apply_entry(page, use_cdp=use_cdp, info_log=info_log):
                 return _apply_fail(
                     page,
                     listing,
@@ -2192,7 +2316,7 @@ def apply_to_job(
                 )
 
             page = _resolve_page_after_apply_click(context, page)
-            _apply_trace(info_log, "Formulář odpovědi otevřen, vyplňuji kontakt a zprávu.")
+            _cmd_progress("Formulář: odpověďní krok otevřen, čekám na pole (textarea / soubor)…", info_log)
 
             try:
                 page.wait_for_selector(
@@ -2202,10 +2326,13 @@ def apply_to_job(
             except PlaywrightTimeoutError:
                 pass
 
-            try:
-                page.wait_for_load_state("networkidle", timeout=20000)
-            except PlaywrightTimeoutError:
-                pass
+            _optional_network_idle(
+                page,
+                use_cdp=use_cdp,
+                timeout_ms=20000,
+                info_log=info_log,
+                label="Formulář",
+            )
             page.wait_for_timeout(1000)
             try:
                 page.evaluate("window.scrollTo(0, Math.min(800, document.body.scrollHeight / 3))")
@@ -2214,6 +2341,7 @@ def apply_to_job(
 
             # 1) Nejdřív přepnout na „Vlastní životopis“ — na Alma Career to odkryje
             #    sekci Jméno / E-mail / Telefon / Zpráva / Souhlasy.
+            _cmd_progress("Formulář: přepínám na vlastní životopis (radio / tlačítko)…", info_log)
             _switch_to_own_file_upload(page)
             try:
                 page.wait_for_timeout(650)
@@ -2350,12 +2478,15 @@ def apply_to_job(
                         "není finální odeslání (zkus Debug slow-mo; může být více kroků nebo jiný text tlačítka)",
                     )
 
-            try:
-                page.wait_for_load_state("networkidle", timeout=18000)
-            except PlaywrightTimeoutError:
-                pass
+            _optional_network_idle(
+                page,
+                use_cdp=use_cdp,
+                timeout_ms=18000,
+                info_log=info_log,
+                label="Po odeslání",
+            )
 
-            _apply_trace(info_log, "Čekám na potvrzení odeslání ze serveru…")
+            _cmd_progress("Stránka: čekám na potvrzení odeslání ze serveru…", info_log)
             if not _submission_succeeded(page, start_url):
                 # Rozlišíme server chybu (má smysl zkusit znovu) od „nevíme":
                 try:
@@ -2374,10 +2505,13 @@ def apply_to_job(
                         page.wait_for_timeout(extra_ms)
                     except PlaywrightError:
                         pass
-                    try:
-                        page.wait_for_load_state("networkidle", timeout=12000)
-                    except PlaywrightTimeoutError:
-                        pass
+                    _optional_network_idle(
+                        page,
+                        use_cdp=use_cdp,
+                        timeout_ms=12000,
+                        info_log=info_log,
+                        label="Potvrzení odeslání",
+                    )
                     if _submission_succeeded(page, start_url):
                         return True, ""
                 _try_gemini_self_heal_after_failure(
@@ -2394,19 +2528,25 @@ def apply_to_job(
                     info_log=info_log,
                 )
                 if _submit_application_with_retries(page):
-                    try:
-                        page.wait_for_load_state("networkidle", timeout=18000)
-                    except PlaywrightTimeoutError:
-                        pass
+                    _optional_network_idle(
+                        page,
+                        use_cdp=use_cdp,
+                        timeout_ms=18000,
+                        info_log=info_log,
+                        label="Po self-heal odeslání",
+                    )
                 for extra_ms in (3500, 7000):
                     try:
                         page.wait_for_timeout(extra_ms)
                     except PlaywrightError:
                         pass
-                    try:
-                        page.wait_for_load_state("networkidle", timeout=12000)
-                    except PlaywrightTimeoutError:
-                        pass
+                    _optional_network_idle(
+                        page,
+                        use_cdp=use_cdp,
+                        timeout_ms=12000,
+                        info_log=info_log,
+                        label="Potvrzení po obnově",
+                    )
                     if _submission_succeeded(page, start_url):
                         return True, ""
                 return _apply_fail(

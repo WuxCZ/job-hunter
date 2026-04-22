@@ -25,8 +25,8 @@ from jobhunter_bot.scraper import build_jobs_search_url, fetch_job_detail, scrap
 class JobHunterModernGUI:
     def __init__(self, root: ctk.CTk) -> None:
         self.root = root
-        self.root.title("JobHunter Pro")
-        self.root.geometry("1320x830")
+        self.root.title("JobHunter")
+        self.root.geometry("1360x860")
 
         self.cfg: AppConfig = load_config()
         self.db = Database(self.cfg.db_path)
@@ -48,7 +48,7 @@ class JobHunterModernGUI:
         self.radius_var = ctk.IntVar(value=30)
         self.cv_var = ctk.StringVar(value="")
         self.open_preview_var = ctk.BooleanVar(value=True)
-        self.mode_var = ctk.StringVar(value="manual")
+        self.mode_var = ctk.StringVar(value="Ruční schválení")
         self.limit_var = ctk.IntVar(value=20)
         self.dry_run_var = ctk.BooleanVar(value=True)
         self.dry_run_ignore_db_var = ctk.BooleanVar(value=False)
@@ -67,6 +67,8 @@ class JobHunterModernGUI:
         self.max_consecutive_fails_var = ctk.IntVar(value=5)
         self.leave_browser_open_var = ctk.BooleanVar(value=False)
         self.auto_recover_after_fail_var = ctk.BooleanVar(value=True)
+        self.verbose_cmd_var = ctk.BooleanVar(value=True)
+        self.cdp_fast_idle_var = ctk.BooleanVar(value=True)
         self.status_var = ctk.StringVar(value="Připraven")
 
         ctk.set_appearance_mode("dark")
@@ -97,11 +99,16 @@ class JobHunterModernGUI:
 
         ctk.CTkButton(
             header,
-            text="Uložit profil",
+            text="Uložit profil a kontakt",
             command=lambda: self._save_profile_from_form(confirm_dialog=False),
-            width=120,
+            width=168,
         ).pack(side=tk.LEFT, padx=8)
-        ctk.CTkButton(header, text="Logout Jobs", command=self._logout_jobs, width=120).pack(side=tk.LEFT, padx=8)
+        ctk.CTkButton(
+            header,
+            text="Odhlásit z Jobs.cz",
+            command=self._logout_jobs,
+            width=148,
+        ).pack(side=tk.LEFT, padx=8)
         self.status_chip = ctk.CTkLabel(
             header,
             textvariable=self.status_var,
@@ -121,33 +128,33 @@ class JobHunterModernGUI:
 
         self.tabs = ctk.CTkTabview(self.root, corner_radius=12)
         self.tabs.pack(fill=tk.BOTH, expand=True, padx=14, pady=(0, 14))
-        self.tabs.add("Dashboard")
-        self.tabs.add("Selhání")
+        self.tabs.add("Přehled")
+        self.tabs.add("Diagnostika")
         self.tabs.add("Nastavení")
 
-        self._build_dashboard(self.tabs.tab("Dashboard"))
-        self._build_failures_tab(self.tabs.tab("Selhání"))
+        self._build_dashboard(self.tabs.tab("Přehled"))
+        self._build_failures_tab(self.tabs.tab("Diagnostika"))
         self._build_settings(self.tabs.tab("Nastavení"))
 
     def _build_dashboard(self, parent: ctk.CTkFrame) -> None:
         controls = ctk.CTkFrame(parent, corner_radius=10)
         controls.pack(fill=tk.X, padx=8, pady=8)
 
-        ctk.CTkLabel(controls, text="Režim", font=ctk.CTkFont(size=14, weight="bold")).pack(
+        ctk.CTkLabel(controls, text="Režim běhu", font=ctk.CTkFont(size=14, weight="bold")).pack(
             side=tk.LEFT, padx=(12, 8), pady=10
         )
         ctk.CTkSegmentedButton(
             controls,
-            values=["manual", "auto"],
+            values=["Ruční schválení", "Auto (bez potvrzení)"],
             variable=self.mode_var,
-            width=170,
+            width=340,
         ).pack(side=tk.LEFT, padx=(0, 12))
 
         ctk.CTkLabel(
             controls,
             text=(
-                "Auto zde = bez kroku „Schválit“, jinak stejný běh jako Manual (Safe mode). "
-                "AUTO.bat v kořeni projektu je zvlášť (watchdog + noční smyčka) — není totéž."
+                "Ruční = po vyplnění čekáš na Schválit. Auto = odešle bez tohoto kroku. "
+                "Soubor AUTO.bat v kořeni je noční smyčka — není stejné jako tento přepínač."
             ),
             font=ctk.CTkFont(size=11),
             text_color=("gray55", "gray65"),
@@ -166,24 +173,42 @@ class JobHunterModernGUI:
         ctk.CTkCheckBox(controls, text="Preview na 2. monitor", variable=self.open_preview_var).pack(
             side=tk.LEFT, padx=(0, 12)
         )
-        ctk.CTkButton(controls, text="Start", command=self.start, width=90).pack(side=tk.LEFT, padx=4)
-        ctk.CTkButton(controls, text="Stop", command=self.stop, width=90, fg_color="#a93f55").pack(side=tk.LEFT, padx=4)
+        ctk.CTkButton(controls, text="Spustit přihlášky", command=self.start, width=148).pack(
+            side=tk.LEFT, padx=4
+        )
         ctk.CTkButton(
             controls,
-            text="Obnovit historii",
+            text="Zastavit běh",
+            command=self.stop,
+            width=118,
+            fg_color="#a93f55",
+        ).pack(side=tk.LEFT, padx=4)
+        ctk.CTkButton(
+            controls,
+            text="Obnovit tabulku historie",
             command=self._on_refresh_history_clicked,
-            width=130,
+            width=168,
         ).pack(side=tk.LEFT, padx=6)
 
         debug_row = ctk.CTkFrame(parent, fg_color="transparent")
         debug_row.pack(fill=tk.X, padx=8, pady=(0, 2))
         ctk.CTkCheckBox(
             debug_row,
-            text="Debug: zpomalit prohlížeč (slow-mo)",
+            text="Slow-mo prohlížeče (debug)",
             variable=self.browser_debug_var,
         ).pack(side=tk.LEFT, padx=(4, 8))
         ctk.CTkLabel(debug_row, text="ms:").pack(side=tk.LEFT)
         ctk.CTkEntry(debug_row, textvariable=self.browser_slow_mo_var, width=56).pack(side=tk.LEFT, padx=(4, 12))
+        ctk.CTkCheckBox(
+            debug_row,
+            text="Podrobný řádek [JobHunter] do konzole (stdout)",
+            variable=self.verbose_cmd_var,
+        ).pack(side=tk.LEFT, padx=(12, 8))
+        ctk.CTkCheckBox(
+            debug_row,
+            text="CDP: krátké networkidle (méně zaseknutí)",
+            variable=self.cdp_fast_idle_var,
+        ).pack(side=tk.LEFT, padx=(4, 8))
 
         safe_row = ctk.CTkFrame(parent, fg_color="transparent")
         safe_row.pack(fill=tk.X, padx=8, pady=(4, 6))
@@ -267,26 +292,41 @@ class JobHunterModernGUI:
 
         action_row = ctk.CTkFrame(pending, fg_color="transparent")
         action_row.pack(fill=tk.X, padx=10, pady=(0, 10))
-        ctk.CTkButton(action_row, text="Schválit", command=lambda: self._set_decision("approve"), width=120).pack(
-            side=tk.LEFT, padx=4
-        )
-        ctk.CTkButton(action_row, text="Přeskočit", command=lambda: self._set_decision("skip"), width=120).pack(
-            side=tk.LEFT, padx=4
-        )
         ctk.CTkButton(
             action_row,
-            text="Stop vše",
+            text="Schválit odeslání",
+            command=lambda: self._set_decision("approve"),
+            width=148,
+        ).pack(side=tk.LEFT, padx=4)
+        ctk.CTkButton(
+            action_row,
+            text="Přeskočit pozici",
+            command=lambda: self._set_decision("skip"),
+            width=138,
+        ).pack(side=tk.LEFT, padx=4)
+        ctk.CTkButton(
+            action_row,
+            text="Ukončit celý běh",
             command=lambda: self._set_decision("stop"),
-            width=120,
+            width=148,
             fg_color="#a93f55",
         ).pack(side=tk.LEFT, padx=4)
 
         log_frame = ctk.CTkFrame(content, corner_radius=10)
         log_frame.grid(row=1, column=1, sticky="nsew", padx=(6, 6), pady=(0, 10))
-        ctk.CTkLabel(log_frame, text="Živý log", font=ctk.CTkFont(size=16, weight="bold")).pack(
-            anchor="w", padx=10, pady=(8, 6)
+        ctk.CTkLabel(
+            log_frame,
+            text="Průběh běhu (živý log)",
+            font=ctk.CTkFont(size=16, weight="bold"),
+        ).pack(anchor="w", padx=10, pady=(8, 6))
+        self.log = ctk.CTkTextbox(
+            log_frame,
+            wrap="word",
+            height=200,
+            font=ctk.CTkFont(family="Consolas", size=13),
+            border_width=1,
+            border_color=("#3d3d3d", "#3d3d3d"),
         )
-        self.log = ctk.CTkTextbox(log_frame, wrap="word", font=ctk.CTkFont(size=14))
         self.log.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
 
         hist_frame = ctk.CTkFrame(content, corner_radius=10)
@@ -325,14 +365,17 @@ class JobHunterModernGUI:
             font=ctk.CTkFont(size=14),
             anchor="w",
         ).pack(side=tk.LEFT, padx=(0, 12))
-        ctk.CTkButton(top, text="Obnovit", command=self._on_refresh_failures_clicked, width=100).pack(
-            side=tk.RIGHT, padx=4
-        )
         ctk.CTkButton(
             top,
-            text="Vymazat seznam",
+            text="Obnovit seznam",
+            command=self._on_refresh_failures_clicked,
+            width=128,
+        ).pack(side=tk.RIGHT, padx=4)
+        ctk.CTkButton(
+            top,
+            text="Vymazat všechna selhání",
             command=self._on_clear_failures_clicked,
-            width=130,
+            width=168,
             fg_color="#6b3a44",
         ).pack(side=tk.RIGHT, padx=4)
 
@@ -829,7 +872,7 @@ class JobHunterModernGUI:
 
     def start(self) -> None:
         if self.worker and self.worker.is_alive():
-            messagebox.showinfo("Info", "Run already active.")
+            messagebox.showinfo("JobHunter", "Běh už probíhá — nejdřív ho zastav.")
             return
         if not self._save_profile_from_form():
             return
@@ -851,6 +894,8 @@ class JobHunterModernGUI:
 
     def _run_worker(self) -> None:
         try:
+            os.environ["JOBHUNTER_CMD_PROGRESS"] = "1" if bool(self.verbose_cmd_var.get()) else "0"
+            os.environ["JOBHUNTER_CDP_FAST_IDLE"] = "1" if bool(self.cdp_fast_idle_var.get()) else "0"
             dry = bool(self.dry_run_var.get())
             profile = self._get_active_profile()
             if not self._validate_cv_path(profile.cv_path, show_message=False):
@@ -909,7 +954,7 @@ class JobHunterModernGUI:
                 max_listings=int(self.limit_var.get() or 20),
             )
             self.events.put(("log", f"Načteno pozic: {len(listings)} | {search_url}"))
-            mode = self.mode_var.get()
+            mode_auto = (self.mode_var.get() or "").strip().lower().startswith("auto")
 
             # --- Safe-mode parametry (platí i v manual režimu, aby měl uživatel brzdy) ---
             safe_mode = bool(self.safe_mode_var.get())
@@ -1045,7 +1090,7 @@ class JobHunterModernGUI:
                     )
 
                 approval_cb = None
-                if mode == "manual":
+                if not mode_auto:
                     def approval_cb() -> str:  # noqa: E306
                         self.pending_decision = None
                         info = (
@@ -1229,7 +1274,7 @@ class JobHunterModernGUI:
                             (
                                 "log",
                                 f"Safe mode: {consecutive_fails} FAILů v řadě → HARD STOP. "
-                                "Zkontroluj diagnostiku v záložce Selhání.",
+                                "Zkontroluj diagnostiku v záložce Diagnostika.",
                             )
                         )
                         break
