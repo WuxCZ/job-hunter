@@ -18,7 +18,11 @@ from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
-from jobhunter_bot.ai import gemini_self_heal_plan, gemini_validate_application_form
+from jobhunter_bot.ai import (
+    gemini_adaptive_fill_plan,
+    gemini_self_heal_plan,
+    gemini_validate_application_form,
+)
 from jobhunter_bot.apply_failure_dump import record_apply_failure
 from jobhunter_bot.db import JobListing
 
@@ -1713,6 +1717,114 @@ def _apply_self_heal_select_picks(page, picks: object) -> None:
                 break
 
 
+def _apply_gemini_adaptive_fills(page, fills: object) -> int:
+    """
+    Aplikuje obecné AI mapování polí přes heuristické párování hint -> input/select/checkbox.
+    """
+    if not isinstance(fills, list):
+        return 0
+    applied = 0
+    js = r"""(actions) => {
+      const norm = (s) => String(s || "").toLowerCase().trim();
+      const visible = (el) => {
+        const r = el.getBoundingClientRect();
+        const st = window.getComputedStyle(el);
+        return r.width > 0 && r.height > 0 && st.display !== "none" && st.visibility !== "hidden";
+      };
+      const labelText = (el) => {
+        const out = [];
+        try {
+          if (el.id) {
+            for (const l of document.querySelectorAll(`label[for="${CSS.escape(el.id)}"]`)) {
+              const t = (l.textContent || "").trim();
+              if (t) out.push(t);
+            }
+          }
+        } catch {}
+        try {
+          const near = el.closest("label");
+          if (near) {
+            const t = (near.textContent || "").trim();
+            if (t) out.push(t);
+          }
+        } catch {}
+        const aria = (el.getAttribute("aria-label") || "").trim();
+        if (aria) out.push(aria);
+        return out.join(" ").toLowerCase();
+      };
+      const fields = Array.from(document.querySelectorAll("input, textarea, select")).filter((el) => {
+        const ty = norm(el.type);
+        if (ty === "hidden" || ty === "submit" || ty === "button" || ty === "reset") return false;
+        return visible(el);
+      });
+      let changed = 0;
+      for (const a of actions.slice(0, 20)) {
+        const hint = norm(a.field_hint || "");
+        const action = norm(a.action || "");
+        const value = String(a.value || "");
+        const optionNeedle = norm(a.option_text_contains || value);
+        if (!hint || !action) continue;
+        const target = fields.find((el) => {
+          const bag = [
+            el.name || "",
+            el.id || "",
+            el.placeholder || "",
+            labelText(el),
+          ].join(" ").toLowerCase();
+          return bag.includes(hint);
+        });
+        if (!target) continue;
+        try {
+          if (action === "fill" && (target.tagName === "INPUT" || target.tagName === "TEXTAREA")) {
+            target.focus();
+            target.value = value;
+            target.dispatchEvent(new Event("input", { bubbles: true }));
+            target.dispatchEvent(new Event("change", { bubbles: true }));
+            changed += 1;
+            continue;
+          }
+          if (action === "select" && target.tagName === "SELECT") {
+            let idx = -1;
+            for (let i = 0; i < target.options.length; i++) {
+              const o = target.options[i];
+              const t = `${o.textContent || ""} ${o.value || ""}`.toLowerCase();
+              if (optionNeedle && t.includes(optionNeedle)) {
+                idx = i;
+                break;
+              }
+            }
+            if (idx >= 0) {
+              target.selectedIndex = idx;
+              target.dispatchEvent(new Event("input", { bubbles: true }));
+              target.dispatchEvent(new Event("change", { bubbles: true }));
+              changed += 1;
+            }
+            continue;
+          }
+          if (action === "check" && target.tagName === "INPUT" && norm(target.type) === "checkbox") {
+            if (!target.checked) {
+              target.checked = true;
+              target.dispatchEvent(new Event("input", { bubbles: true }));
+              target.dispatchEvent(new Event("change", { bubbles: true }));
+              changed += 1;
+            }
+          }
+        } catch {}
+      }
+      return changed;
+    }"""
+    for fr in page.frames:
+        try:
+            n = fr.evaluate(js, fills)
+        except PlaywrightError:
+            continue
+        try:
+            applied += int(n or 0)
+        except (TypeError, ValueError):
+            continue
+    return applied
+
+
 def _execute_self_heal_plan(
     page,
     plan: dict,
@@ -1865,6 +1977,55 @@ def _try_gemini_self_heal_after_failure(
         applicant_availability=applicant_availability,
     )
     return True
+
+
+def _try_gemini_adaptive_fill(
+    page,
+    listing: JobListing,
+    *,
+    gemini_api_key: str,
+    gemini_model: str,
+    applicant_full_name: str,
+    applicant_email: str,
+    applicant_phone: str,
+    applicant_salary: str,
+    applicant_availability: str,
+    message: str,
+    info_log: list[str] | None,
+) -> int:
+    if os.environ.get("GEMINI_ADAPTIVE_FILL", "1").strip().lower() in ("0", "false", "no", "off"):
+        return 0
+    if not (gemini_api_key or "").strip():
+        return 0
+    profile = {
+        "full_name": applicant_full_name,
+        "email": applicant_email,
+        "phone": applicant_phone,
+        "salary": applicant_salary,
+        "availability": _effective_availability_text(applicant_availability),
+        "message": message,
+    }
+    try:
+        plan, msg = gemini_adaptive_fill_plan(
+            gemini_api_key,
+            gemini_model,
+            page,
+            listing_title=listing.title or "",
+            profile=profile,
+        )
+    except Exception as exc:
+        if info_log is not None:
+            info_log.append(f"Gemini adaptive fill: výjimka {exc.__class__.__name__}: {exc}")
+        return 0
+    if info_log is not None and msg:
+        info_log.append(msg)
+    if not isinstance(plan, dict):
+        return 0
+    fills = plan.get("fills")
+    count = _apply_gemini_adaptive_fills(page, fills)
+    if info_log is not None:
+        info_log.append(f"Gemini adaptive fill: aplikováno změn {count}.")
+    return count
 
 
 def apply_to_job(
@@ -2054,6 +2215,19 @@ def apply_to_job(
             avail_text = _effective_availability_text(applicant_availability)
             if avail_text:
                 _fill_applicant_availability(page, avail_text)
+            _try_gemini_adaptive_fill(
+                page,
+                listing,
+                gemini_api_key=gemini_api_key,
+                gemini_model=gemini_model,
+                applicant_full_name=applicant_full_name,
+                applicant_email=applicant_email,
+                applicant_phone=applicant_phone,
+                applicant_salary=applicant_salary,
+                applicant_availability=applicant_availability,
+                message=message,
+                info_log=info_log,
+            )
 
             _check_application_consents(page)
             _apply_trace(info_log, "Souhlasy zkontrolovány, před odesláním.")

@@ -521,6 +521,160 @@ Pravidla:
     return parsed, "Gemini self-heal: plán přijat, provádím kroky…"
 
 
+def gemini_adaptive_fill_plan(
+    api_key: str,
+    model_name: str,
+    page: object,
+    *,
+    listing_title: str,
+    profile: dict,
+) -> tuple[dict | None, str]:
+    """
+    Obecný AI plán pro doplnění libovolného formuláře podle viditelných polí.
+    Vrací (plan_dict | None, log_message).
+    """
+    if not (api_key or "").strip():
+        return None, ""
+
+    form_js = r"""() => {
+      const isVisible = (el) => {
+        const r = el.getBoundingClientRect();
+        const st = window.getComputedStyle(el);
+        return (
+          r.width > 0 && r.height > 0 &&
+          st.visibility !== "hidden" &&
+          st.display !== "none" &&
+          el.getAttribute("aria-hidden") !== "true"
+        );
+      };
+      const labelText = (el) => {
+        let parts = [];
+        try {
+          if (el.id) {
+            for (const l of document.querySelectorAll(`label[for="${CSS.escape(el.id)}"]`)) {
+              const t = (l.textContent || "").trim();
+              if (t) parts.push(t);
+            }
+          }
+        } catch {}
+        try {
+          const near = el.closest("label");
+          if (near) {
+            const t = (near.textContent || "").trim();
+            if (t) parts.push(t);
+          }
+        } catch {}
+        try {
+          const aria = (el.getAttribute("aria-label") || "").trim();
+          if (aria) parts.push(aria);
+        } catch {}
+        return [...new Set(parts)].join(" | ").slice(0, 200);
+      };
+      const out = [];
+      for (const el of document.querySelectorAll("input, textarea, select")) {
+        const tag = (el.tagName || "").toUpperCase();
+        const ty = (el.type || "").toLowerCase();
+        if (ty === "hidden" || ty === "submit" || ty === "button" || ty === "reset") continue;
+        if (!isVisible(el)) continue;
+        const item = {
+          tag,
+          type: ty,
+          name: String(el.name || "").slice(0, 100),
+          id: String(el.id || "").slice(0, 100),
+          placeholder: String(el.placeholder || "").slice(0, 120),
+          label: labelText(el),
+          requiredHint: !!(el.required || el.getAttribute("aria-required") === "true"),
+          valuePreview: String(el.value || "").slice(0, 120),
+        };
+        if (tag === "SELECT") {
+          item.optionsPreview = Array.from(el.options).slice(0, 60).map((o) => ({
+            value: String(o.value || "").slice(0, 120),
+            text: String((o.textContent || "").trim()).slice(0, 140),
+          }));
+        }
+        out.push(item);
+      }
+      return { fields: out.slice(0, 220) };
+    }"""
+
+    try:
+        payload = page.evaluate(form_js)
+    except Exception as exc:
+        return None, f"Gemini adaptive fill: čtení formuláře selhalo ({exc})"
+    try:
+        png = page.screenshot(type="png", full_page=True, timeout=60000)
+    except Exception:
+        png = b""
+    if png:
+        try:
+            png = _resize_png_for_gemini(png)
+        except Exception:
+            pass
+
+    profile_json = json.dumps(profile or {}, ensure_ascii=False, indent=2)
+    form_json = json.dumps(payload or {}, ensure_ascii=False, indent=2)
+    prompt = f"""Jsi asistent na adaptivní vyplnění pracovního formuláře.
+
+Pozice: {listing_title}
+Profil uchazeče (zdroj hodnot):
+{profile_json}
+
+Viditelná pole formuláře:
+{form_json}
+
+Úkol: navrhni bezpečný plán mapování hodnot z profilu do polí formuláře tak, aby to fungovalo obecně.
+Nevymýšlej nové osobní údaje. Používej jen hodnoty z profilu.
+
+Odpověz POUZE JSON:
+{{
+  "analysis_cs": "stručně co chybí / co doplnit",
+  "fills": [
+    {{
+      "field_hint": "část label/name/id/placeholder",
+      "action": "fill|select|check",
+      "value": "pro fill",
+      "option_text_contains": "pro select",
+      "reason_cs": "proč"
+    }}
+  ]
+}}
+
+Pravidla:
+- fills max 18 položek.
+- action=select použij jen když v poli SELECT je odpovídající volba v optionsPreview.
+- action=check jen pro zjevné souhlasy / potvrzení.
+- Pokud je formulář už vyplněný, vrať fills: [].
+"""
+    genai.configure(api_key=api_key)
+    model = genai.GenerativeModel(model_name=model_name)
+    try:
+        gen_kwargs: dict = {
+            "temperature": 0.15,
+            "max_output_tokens": 2048,
+            "response_mime_type": "application/json",
+        }
+        try:
+            generation_config = genai.types.GenerationConfig(**gen_kwargs)
+        except TypeError:
+            gen_kwargs.pop("response_mime_type", None)
+            generation_config = genai.types.GenerationConfig(**gen_kwargs)
+        if png:
+            from PIL import Image
+
+            image = Image.open(io.BytesIO(png))
+            resp = model.generate_content([prompt, image], generation_config=generation_config)
+        else:
+            resp = model.generate_content(prompt, generation_config=generation_config)
+        raw = (resp.text or "").strip()
+    except Exception as exc:
+        return None, f"Gemini adaptive fill: API selhalo ({exc})"
+
+    parsed = _parse_json_object_from_gemini(raw)
+    if not isinstance(parsed, dict):
+        return None, "Gemini adaptive fill: model nevrátil JSON."
+    return parsed, "Gemini adaptive fill: plán přijat."
+
+
 # --- Fit scoring vyladěný na profil: HW, helpdesk/servicedesk L1/L2, Windows Server ---
 #
 # Baseline je schválně LOW (20), aby "IT" samotné nestačilo. Skóre ≥50 vyžaduje
